@@ -628,7 +628,8 @@ class GaussianDiffusion(nn.Module):
     def model_predictions(self, x, cond_img, t, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
         
         model_output = self.model(x, cond_img, t, x_self_cond)
-
+        
+        #MASK X if True
         if (self.config['mask_cond'] and self.config['mask_x']):
             
             mask = torch.zeros_like(cond_img)

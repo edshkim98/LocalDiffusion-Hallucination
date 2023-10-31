@@ -63,6 +63,7 @@ if __name__ == "__main__":
             lr = lr.to(device)
             cls = cls.to(device)
             
+            #MASK COND IMG        
             if config['mask_cond']:
                 if config['cond'] == 'IN':
                     mask = torch.zeros_like(lr)
@@ -75,10 +76,8 @@ if __name__ == "__main__":
                     mask[:,:,:,length//2:] = 1.0
                     mask = 1.0 - mask
                     lr = lr * mask
-            #Inference to get indistribution region
+
             out = trainer.ema.ema_model.sample(lr, batch_size=lr.shape[0], return_all_timesteps = False)
-            #Inference to get OOD region
-            # out = trainer.ema.ema_model.sample(lr, mask = (out, seg), batch_size=lr.shape[0], return_all_timesteps = False, background_mask = True)
 
             lst.append(torch.nn.MSELoss()(out, hr).cpu().detach().numpy())
             lst_hr.append(hr.cpu().detach().numpy())
