@@ -4,7 +4,7 @@
 **Research question:** It is unknown whether and how the in-/out-of-distribution regions are affecting each other in terms of hallucination for generative models (e.g. diffusion models) <br />
 **Hypothesis:** More hallucination and error prone when the input conditioned image contains OOD region <br />
 **Initial Exp:** Localize image generation by partioning a condition image/noisy image based on OOD and IND regions <br />
-**Code modifications:** Masking operation is inside ddpm.py
+**Code modifications:** Masking operation is inside ddpm.py and test.py
 1. No masking
 2. Condition_OUT
 3. Condition_IN
