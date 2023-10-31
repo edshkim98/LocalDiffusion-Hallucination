@@ -21,4 +21,5 @@ std_flair: 680.8201
 mnist_path: './MNIST/raw/train-images-idx3-ubyte'
 mnist_labels_path: './MNIST/raw/train-labels-idx1-ubyte'
 mask_cond: False
+mask_x: False
 cond: 'IN'

@@ -67,12 +67,12 @@ if __name__ == "__main__":
                 if config['cond'] == 'IN':
                     mask = torch.zeros_like(lr)
                     length = mask.shape[-1]
-                    mask[:,:,:,14:] = 1.0
+                    mask[:,:,:,length//2:] = 1.0
                     lr = lr * mask
                 else:
                     mask = torch.zeros_like(lr)
                     length = mask.shape[-1]
-                    mask[:,:,:,14:] = 1.0
+                    mask[:,:,:,length//2:] = 1.0
                     mask = 1.0 - mask
                     lr = lr * mask
             #Inference to get indistribution region

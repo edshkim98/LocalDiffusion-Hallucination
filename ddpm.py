@@ -629,8 +629,17 @@ class GaussianDiffusion(nn.Module):
         
         model_output = self.model(x, cond_img, t, x_self_cond)
 
-        if self.config['mask_cond']:
-            mask = (cond_img > 0).to(torch.float16) 
+        if (self.config['mask_cond'] and self.config['mask_x']):
+            
+            mask = torch.zeros_like(cond_img)
+            length = mask.shape[-1]
+            mask[:,:,:,length//2:] = 1.0 #COND_IN
+            if self.config['cond'] == 'IN':
+                if self.config['mask_x_inv']:
+                    mask = 1. - mask 
+            else:
+                if not self.config['mask_x_inv']:
+                    mask = 1. - mask
             model_output = model_output * mask
 
         maybe_clip = partial(torch.clamp, min = 0., max = 1.) if clip_x_start else identity
