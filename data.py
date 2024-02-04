@@ -12,6 +12,7 @@ from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
+import torchvision.transforms as transforms
 
 from datasets.utils.file_utils import get_datasets_user_agent
 import io
@@ -22,10 +23,6 @@ import glob
 
 from medpy.io import load
 from medpy.io import header
-
-import idx2numpy
-from torchvision import transforms as T
-import torchvision.transforms as transforms
 
 torch.set_warn_always(False)
 
@@ -54,114 +51,355 @@ def my_collate(batch):
     if batch == []:
         return None
     
-    return default_collate(batch)
-
-class supervisedIQT(Dataset):
-    def __init__(self, config, lr_files, hr_files, train=True):
-        self.config = config
-        self.lr_files = lr_files
-        self.hr_files = hr_files
-
-        self.mean_lr = self.config['Data']['mean']#202.68109075616067 #35.493949511348724
-        self.std_lr = self.config['Data']['std']#346.51374798642223 #37.11344433531084
-
-        if self.config['Train']['batch_sample']:
-            self.patch_size = self.config['Train']['patch_size_sub'] * self.config['Train']['batch_sample_factor']
-        else:
-            self.patch_size = self.config['Train']['patch_size_sub']
+    return default_collate(batch)    
+class MvtecDataset(Dataset):
+    def __init__(self, files, train=False, mode=None):
         self.train = train
-        if self.train:
-            self.ratio = 0.2
-        else:
-            self.ratio = 0.8
-
-        self.files_lr = []
-        self.files_hr = []
-        
-        for i in range(len(self.lr_files)):
-            self.files_lr.append(self.lr_files[i])
-            self.files_hr.append(self.hr_files[i])
-
+        self.files = files
+        self.mode = mode
+        self.lst = []
+        for file in self.files:
+            if self.train:
+                if 'good' in file:
+                    self.lst.append(file)
+            else:
+                if self.mode == None:
+                    if 'good' not in file:
+                        self.lst.append(file)
+                else:
+                    if self.mode in file:
+                        self.lst.append(file)
     def __len__(self):
-        return len(self.files_lr)
-
-    def normalize(self, img, mode='lr'): # transform 3D array to tensor
-
-        if self.config['Data']['norm'] == 'min-max':
-            return 2*(((img-img.min())/(img.max()-img.min()))-0.5)
-        return (img - self.mean_lr)/self.std_lr
+        return len(self.lst)
     
-    def cube(self,data):
-
-        hyp_norm = data
-
-        if len(hyp_norm.shape)>3:
-            hyp_norm = hyp_norm[:,:, 2:258, 27:283]
-        else:
-            hyp_norm = hyp_norm[2:258, 27:283, :256]
-
-        return hyp_norm
-
+    def RGB2Gray(self, x):
+        x = torch.matmul(x[:3,...].permute(1,2,0), torch.tensor([0.2989, 0.5870, 0.1140]))
+        return x
+    
+    def transform(self, img, size=(224, 224)):
+        T = transforms.Compose([
+            transforms.Resize(size),
+            #transforms.ColorJitter(brightness=0.5, hue=0.5),
+            transforms.ToTensor()
+        ])
+        img = T(img)
+        return img
+    
     def __getitem__(self, idx):
-        
-        self.lr = self.files_lr[idx]
-        self.hr = self.lr.replace('lr_norm',self.config['Data']['groundtruth_fname'])#'T1w_acpc_dc_restore_brain')   #'T1w_acpc_dc_restore_brain_sim036T_4x_groundtruth_norm')
-        
-        self.lr = nib.load(self.lr)
-        self.lr_affine = self.lr.affine
-        self.lr = torch.tensor(self.lr.get_fdata().astype(np.float32))
-        self.img_shape = self.lr.shape
-        self.hr = nib.load(self.hr)
-        self.hr_affine = self.hr.affine
-        self.hr = torch.tensor(self.hr.get_fdata().astype(np.float32))
-        
-        #Cube
-        low, high = 0, 256 #16, 240 
-        
-        assert self.lr.shape == (256,256,256), f'lr must be 256 256 256 but got {self.lr.shape}'
-        assert self.hr.shape == (256,256,256), f'hr must be 256 256 256 but got {self.hr.shape}'
+        img_rgb = Image.open(self.lst[idx]).convert('RGB')
+        img_rgb = self.transform(img_rgb)
+        img_gray = self.RGB2Gray(img_rgb)
+        if len(img_gray.shape) == 2:
+            img_gray = img_gray.unsqueeze(0)
+        label = 0 if 'good' in self.lst[idx] else 1
 
-        self.lr = self.lr[low:high,low:high,low:high]
-        self.hr = self.hr[low:high,low:high,low:high] 
+        return img_rgb, img_gray, label
 
-        random_idx = np.random.randint(low=0, high=(high-low)-self.patch_size, size=3)
-        self.lr = self.lr[random_idx[0]:random_idx[0]+self.patch_size, random_idx[1]:random_idx[1]+self.patch_size, random_idx[2]:random_idx[2]+self.patch_size]
-        self.hr = self.hr[random_idx[0]:random_idx[0]+self.patch_size, random_idx[1]:random_idx[1]+self.patch_size, random_idx[2]:random_idx[2]+self.patch_size]
-	
-        non_zero = np.count_nonzero(self.lr)
-        self.total_voxel = self.patch_size * self.patch_size * self.patch_size
-        non_zero_proportion = (non_zero/self.total_voxel)
-        if (non_zero_proportion < self.ratio):
-            return self.__getitem__(idx)
-                            
-        self.lr = self.normalize(self.lr, mode='lr')
-        self.hr = self.normalize(self.hr, mode='hr')
-            
-        sample_lr = torch.unsqueeze(self.lr, 0)
-        sample_hr = torch.unsqueeze(self.hr, 0)
+class MvtecDatasetGray(Dataset):
+    def __init__(self, files, train=False, mode=None, max_num=False, denoise=False):
+        self.train = train
+        self.denoise = denoise
+        self.files = files
+        self.mode = mode
+        self.max_num = max_num
+        self.lst = []
+        for file in self.files:
+            if self.train:
+                if 'good' in file:
+                    self.lst.append(file)
+                if self.max_num is not False:
+                    if len(self.lst) == self.max_num:
+                        break
+            else:
+                if self.mode == None:
+                    if 'good' not in file:
+                        self.lst.append(file)
+                else:
+                    if self.mode in file:
+                        self.lst.append(file)
+                    if len(self.lst) == self.max_num:
+                        break
+    def __len__(self):
+        return len(self.lst)
+    
+    def RGB2Gray(self, x):
+        x = torch.matmul(x[:3,...].permute(1,2,0), torch.tensor([0.2989, 0.5870, 0.1140]))
+        return x
+    
+    def transform(self, img, size=(112, 112)):
+        T = transforms.Compose([
+            transforms.Resize(size),
+            #transforms.ColorJitter(brightness=0.5, hue=0.5),
+            transforms.ToTensor()
+        ])
+        img = T(img)
+        return img
+    def salt_and_pepper_noise(self, image, salt_pepper_ratio=0.5, amount=0.05):
+        """
+        Add salt and pepper noise to a grayscale image tensor.
+
+        :param image: A grayscale image tensor of shape (H, W) or (1, H, W).
+        :param salt_pepper_ratio: The ratio of salt to pepper noise.
+        :param amount: The proportion of image pixels to alter with noise.
+        :return: Noisy image tensor.
+        """
+
+        # Create a copy of the input image to avoid modifying the original one
+        noisy_image = image.clone()
+
+        # Calculate the number of pixels to alter based on the specified amount
+        num_salt = int(round(amount * image.numel() * salt_pepper_ratio))
+        num_pepper = int(round(amount * image.numel() * (1.0 - salt_pepper_ratio)))
+
+        # Add Salt noise (set pixels to 1)
+        indices = torch.randperm(image.numel())[:num_salt]
+        noisy_image.view(-1)[indices] = 1
+
+        # Add Pepper noise (set pixels to 0)
+        indices = torch.randperm(image.numel())[:num_pepper]
+        noisy_image.view(-1)[indices] = 0
+
+        return noisy_image
+    
+    def __getitem__(self, idx):
+        img_rgb = Image.open(self.lst[idx]).convert('RGB')
+        img_rgb = self.transform(img_rgb)
         
-        if self.train:
-            return sample_hr, sample_lr
-        else:    
-            return sample_hr, sample_lr
+        img_gray = self.RGB2Gray(img_rgb)
+        if self.denoise:
+            img_gray_down = self.salt_and_pepper_noise(img_gray)
+            img_gray = img_gray * 2
+            img_gray_down = img_gray_down * 2
+        else:
+            img_gray = img_gray * 2
+            img_size = img_gray.shape[-1] // 2
+            img_gray_down = img_gray.unsqueeze(0).unsqueeze(0)
+            img_gray_down = F.interpolate(img_gray_down, scale_factor=0.5, mode='nearest')#img_rgb[:,::2,::2]
+            img_gray_down = F.interpolate(img_gray_down, scale_factor=2.0, mode='bilinear', align_corners=False)
+            #img_gray = img_gray * 2
+            #img_gray_down = img_gray[::2,::2]
+            #img_gray_down = img_gray_down.unsqueeze(0).unsqueeze(0)
+            #img_gray_down = F.interpolate(img_gray_down, size=(img_gray.shape[-1], img_gray.shape[-1]), mode='bilinear', align_corners=False)
 
-class IQTDataset(Dataset):
+        if len(img_gray_down.shape) == 4:
+            img_gray_down = img_gray_down.squeeze(0)
+        if len(img_gray.shape) == 2:
+            img_gray = img_gray.unsqueeze(0)
+        if len(img_gray_down.shape) == 2:
+            img_gray_down = img_gray_down.unsqueeze(0)
+
+        if not self.train:
+            label = self.lst[idx].replace('test', 'ground_truth')
+            name = label.split('/')[-1][:-4] + '_mask.png'
+            label = label.replace(label.split('/')[-1], name)
+            label = self.transform(Image.open(label))
+            label[label > 0] = 1
+        else:
+            label = 0 if 'good' in self.lst[idx] else 1
+
+        return img_gray, img_gray_down, label
+
+class MvtecDatasetSR(Dataset):
+    def __init__(self, files, train=False, mode=None, max_num=False, mask_train=False, denoise=False):
+        self.train = train
+        self.mask_train = mask_train
+        self.files = files
+        self.mode = mode
+        self.max_num = max_num
+        self.denoise = denoise
+        self.lst = []
+        for file in self.files:
+            if self.train:
+                if 'good' in file:
+                    self.lst.append(file)
+                if self.max_num is not False:
+                    if len(self.lst) == self.max_num:
+                        break
+            else:
+                if self.mode == None:
+                    if 'good' not in file:
+                        self.lst.append(file)
+                else:
+                    if self.mode in file:
+                        self.lst.append(file)
+                    if len(self.lst) == self.max_num:
+                        break
+    def __len__(self):
+        return len(self.lst)
+    
+    def RGB2Gray(self, x):
+        x = torch.matmul(x[:3,...].permute(1,2,0), torch.tensor([0.2989, 0.5870, 0.1140]))
+        return x
+    
+    def select_patch(self, img, img_down):
+        img_new = torch.zeros_like(img)
+        img_down_new = torch.zeros_like(img_down)
+        mask = torch.zeros_like(img)
+        size = np.random.randint(img.shape[-1]/4, img.shape[-1]/2,2)
+        x = np.random.randint(0, img.shape[-1]-size[0]-1)
+        y = np.random.randint(0, img.shape[-1]-size[1]-1)
+        img_new[:,x:x+size[0],y:y+size[1]] = img[:,x:x+size[0],y:y+size[1]]
+        img_down_new[:,x:x+size[0],y:y+size[1]] = img_down[:,x:x+size[0],y:y+size[1]]
+        mask[:,x:x+size[0],y:y+size[1]] = 1
+
+        return img_new, img_down_new, mask
+    
+    def salt_and_pepper_noise(self, image, salt_pepper_ratio=0.5, amount=0.02):
+        """
+        Add salt and pepper noise to a grayscale image tensor.
+
+        :param image: A grayscale image tensor of shape (H, W) or (1, H, W).
+        :param salt_pepper_ratio: The ratio of salt to pepper noise.
+        :param amount: The proportion of image pixels to alter with noise.
+        :return: Noisy image tensor.
+        """
+        if not self.train:
+            torch.manual_seed(0)
+            torch.random.manual_seed(0)
+
+        # Create a copy of the input image to avoid modifying the original one
+        noisy_image = image.clone()
+
+        # Calculate the number of pixels to alter
+        num_pixels = int(amount * image.numel() / 3)  # Dividing by 3 for three channels
+        num_salt = int(round(num_pixels * salt_pepper_ratio))
+        num_pepper = num_pixels - num_salt
+
+        # Generate random indices for salt noise
+        salt_indices = torch.randperm(image.nelement() // 3)[:num_salt]
+        noisy_image.view(3, -1)[:,salt_indices] = torch.tensor([1.0, 1.0, 1.0]).to(torch.float32).unsqueeze(1).repeat(1, num_salt)
+
+        # Generate random indices for pepper noise
+        pepper_indices = torch.randperm(image.nelement() // 3)[:num_pepper]
+        noisy_image.view(3, -1)[:,pepper_indices] = torch.tensor([0.0, 0.0, 0.0]).to(torch.float32).unsqueeze(1).repeat(1, num_pepper)
+
+        return noisy_image
+       
+    def transform(self, img, size=(112, 112)):
+        T = transforms.Compose([
+            transforms.Resize(size),
+            transforms.ToTensor()
+        ])
+        img = T(img)
+        return img
+    
+    def __getitem__(self, idx):
+        img_rgb = Image.open(self.lst[idx]).convert('RGB')
+        img_rgb = self.transform(img_rgb)
+
+        if self.denoise:
+            img_rgb_down = self.salt_and_pepper_noise(img_rgb)
+            img_rgb = img_rgb * 2
+            img_rgb_down = img_rgb_down * 2
+        else:
+            img_rgb = img_rgb * 2
+            img_size = img_rgb.shape[-1] // 2
+            img_rgb_down = img_rgb.unsqueeze(0)
+            img_rgb_down = F.interpolate(img_rgb_down, size=(img_size, img_size), mode='nearest')#img_rgb[:,::2,::2]
+            img_rgb_down = F.interpolate(img_rgb_down, size=(img_rgb.shape[-1], img_rgb.shape[-1]), mode='bilinear', align_corners=False)
+
+            #img_rgb_down = img_rgb[:,::2,::2]
+            #img_rgb_down = img_rgb_down.unsqueeze(0)
+            #img_rgb_down = F.interpolate(img_rgb_down, size=(img_rgb.shape[-1], img_rgb.shape[-1]), mode='bilinear', align_corners=False)
+        if len(img_rgb_down.shape) == 4:
+            img_rgb_down = img_rgb_down.squeeze(0)
+
+        if self.mask_train:
+            img_rgb, img_rgb_down, mask = self.select_patch(img_rgb, img_rgb_down)
+            return img_rgb, img_rgb_down, mask
+        
+        if not self.train:
+            label = self.lst[idx].replace('test', 'ground_truth')
+            name = label.split('/')[-1][:-4] + '_mask.png'
+            label = label.replace(label.split('/')[-1], name)
+            label = self.transform(Image.open(label))
+            label[label > 0] = 1
+        else:
+            label = 0 if 'good' in self.lst[idx] else 1
+
+        return img_rgb, img_rgb_down, label
+
+
+#IMAGE TRANSLATION for BRATS
+class MedDataset_png(Dataset):
     def __init__(
         self,
-        hr_files,
-        lr_files,
+        config,
+        mri_files,
+        train=True,
+        tumor=False
     ):
-        self.hrfiles = glob.glob(hr_files)
-        self.lrfiles = glob.glob(lr_files)
-        self.mid = 128
+        self.config = config
+        self.mris = mri_files
+        self.train = train
+        self.tumor = tumor
+        self.lst = []
+        for mri in self.mris:
+            t1 = mri.replace('flair','t1')
+            seg = mri.replace('_flair.png', '_seg.npy')
+            flair = mri
+            seg = np.load(seg)
+            #only healthy subjects
+            if self.train:
+                if np.unique(seg).size == 1:
+                    self.lst.append([t1,flair,seg])
+            else:
+                if self.tumor:
+                    if np.unique(seg).size != 1:
+                        x = (seg > 0).astype(np.float16)
+                        #return the number of nonzero elements
+                        ood_proportion = np.count_nonzero(x)/(256**2)
+                        if ood_proportion > 0.01:
+                            self.lst.append([t1,flair,seg])
+                        if len(self.lst) == 50:
+                            break
+                else:
+                    if np.unique(seg).size == 1:
+                        self.lst.append([t1,flair,seg])
+                    if len(self.lst) == 50:
+                        break
+
+    def transform(self, img, img2, seg, size=(224,224)):
+        if self.config['augmentations']: 
+            if self.train:
+                T = transforms.Compose([
+                    transforms.CenterCrop(size),
+                    transforms.RandomRotation(15),
+                    transforms.RandomVerticalFlip()
+                ])
+            else:
+                T = transforms.Compose([
+                    transforms.CenterCrop(size)
+                ])
+            seed = torch.random.seed()  # Ensure random state is the same for both images
+            torch.random.manual_seed(seed)
+            img = T(img)
+            torch.random.manual_seed(seed)
+            img2 = T(img2)
+            torch.random.manual_seed(seed)
+            seg = T(seg)
+            return img, img2, seg
+        else:
+            T = transforms.Compose([
+                transforms.CenterCrop(size)
+            ])
+            img =  T(img)
+            img2 = T(img2)
+            seg = T(seg)
+            #img = T.GaussianBlur(kernel_size=3, sigma=(0.7, 1.0))(img)
+            #return T(img)
+            return img, img2, seg
         
-        assert len(self.hrfiles) == len(self.hrfiles), "Length should be same"
-    
-    def transform(self, img, size=(256,256)):
-        return TF.resize(img, size)
+    def normalize(self, img, mode='t1'):
+        if mode == 't1':
+            img = (img - self.config['mean_t1'])/(self.config['std_t1'])
+        else:
+            img = (img - self.config['mean_flair'])/(self.config['std_flair'])
+
+        if self.config['translate_zero']:
+            mini = torch.abs(img.min())
+            img = img + mini
         
-    def normalize(self, img):
-        img = (img-img.min())/(img.max()-img.min())
         return img
     
     def np2tensor(self, x):
@@ -170,28 +408,31 @@ class IQTDataset(Dataset):
         return x
 
     def __len__(self):
-        return len(self.hrfiles)
+        return len(self.lst)
 
     def __getitem__(self, idx):
+        t1, flair, seg = self.lst[idx][0], self.lst[idx][1], self.lst[idx][2]
+        t1_sample = np.array(Image.open(t1)).astype(np.float32)#[:,:,0]
+        flair_sample = np.array(Image.open(flair)).astype(np.float32)#[:,:,0]
+        seg = torch.tensor(seg.astype(np.float32))
 
-        hrfile = self.hrfiles[idx]
-        lrfile = self.hrfiles[idx].replace('T1w_acpc_dc_restore_brain_sim036T_4x_groundtruth_norm.nii', 'lr_norm.nii')
-        idx = self.mid
+        t1_sample = self.np2tensor(t1_sample)
+        flair_sample = self.np2tensor(flair_sample)
+        seg = self.np2tensor(seg)
+
+        t1_sample, flair_sample, seg = self.transform(t1_sample, flair_sample, seg)
+        #t1_sample = self.transform(t1_sample)
+        t1_sample = self.normalize(t1_sample, mode='t1')
         
-        hrimg = nib.load(hrfile).get_fdata().astype(np.float32)[:,idx,:]
-        hrimg = self.np2tensor(hrimg)
-        hrimg = self.transform(hrimg)
-        hrimg = self.normalize(hrimg)
-        
-        lrimg = nib.load(lrfile).get_fdata().astype(np.float32)[:,idx,:]
-        lrimg = self.np2tensor(lrimg)
-        lrimg = self.transform(lrimg)
-        lrimg = self.normalize(lrimg)
+        #flair_sample = self.np2tensor(flair_sample)
+        #flair_sample = self.transform(flair_sample)
+        flair_sample = self.normalize(flair_sample, mode='flair')
+
+        #seg = self.np2tensor(seg)
+        #seg = self.transform(seg)
   
-        return hrimg, lrimg
-    
-
-#IMAGE TRANSLATION for BRATS
+        return t1_sample, flair_sample, seg 
+      
 class MedDataset(Dataset):
     def __init__(
         self,
@@ -212,18 +453,23 @@ class MedDataset(Dataset):
 
             seg, _ = load(seg)
             self.cnt = 0
+            self.total = 28
             #only healthy subjects
             if self.train:
-                for i in range(50,140,2):
+                for i in range(60,120,5):
                     slice = seg[:,:,i]
                     if np.unique(slice).size == 1:
                         self.lst.append([t1,flair,slice,i])
             else:
                 if self.tumor:
-                    low,high,skip = 80,100,5
+                    low,high,skip = 60,120,5
                     for i in range(low, high, skip):
                         slice = seg[:,:,i]
                         if np.unique(slice).size != 1:
+                            x = (slice > 0).astype(np.float16)
+                            #return the number of nonzero elements
+                            ood_proportion = np.count_nonzero(x)/(256**2)
+         #                   if ood_proportion < 0.01:
                             self.lst.append([t1,flair,slice,i])
                             self.cnt+=1
                         if self.cnt == 2:
@@ -237,15 +483,26 @@ class MedDataset(Dataset):
                             self.cnt+=1
                         if self.cnt == 2:
                             break
+                if len(self.lst) == self.total:
+                    break
+
     def transform(self, img, size=(224,224)):
-        return T.CenterCrop(size)(img)
+        
+        img =  T.CenterCrop(size)(img)
+        #img = T.GaussianBlur(kernel_size=3, sigma=(0.7, 1.0))(img)
+        return img
         
     def normalize(self, img, mode='t1'):
+        #img = (img - img.min()) / (img.max() - img.min())
+        #img = ((img / 4096.0)*255).to(torch.uint8)
+        #img = img / 255.0
+        #img = 2*(img-0.5)
+         
         if mode == 't1':
             img = (img - self.config['mean_t1'])/(self.config['std_t1'])
         else:
             img = (img - self.config['mean_flair'])/(self.config['std_flair'])
-        #img = (img-img.min())/(img.max()-img.min())
+        
         return img
     
     def np2tensor(self, x):
@@ -337,7 +594,147 @@ class SingleMedDataset(Dataset):
   
         return flair_sample, t1_sample, seg
 
-# #MNIST
+#IMAGE Segmentation for BRATS
+class MedSegDataset(Dataset):
+    def __init__(
+        self,
+        config,
+        mri_files,
+        train=True
+    ):
+        self.config = config
+        self.mris = mri_files
+        self.train = train
+        self.lst = []
+        for mri in self.mris:
+            flair = glob.glob(mri + '/VSD.Brain.XX.O.MR_Flair/*.mha')[0]
+            seg = glob.glob(mri + 'VSD.Brain_*more.XX*/*.mha')[0]
+
+            seg, _ = load(seg)
+            self.cnt = 0
+            self.total = 28
+            low,high,skip = 60,140,3
+            for i in range(low, high, skip):
+                slice = seg[:,:,i]
+                if len(np.unique(slice)) > 1:
+                    self.lst.append([flair,slice,i])
+                #else:
+                #    self.lst_healthy.append([flair,slice,i])
+
+        #print(len(self.lst_tumor), len(self.lst_healthy))
+        #self.lst = self.lst_tumor #+ self.lst_healthy
+                
+
+    def transform(self, img, size=(224,224)):
+        transform = T.Compose([
+            T.CenterCrop(size)])
+            #T.RandomHorizontalFlip(),
+            #T.RandomVerticalFlip()])
+        return transform(img)
+        
+    def normalize(self, img):
+        
+        img = (img - self.config['mean_flair'])/(self.config['std_flair'])
+        
+        return img
+    
+    def np2tensor(self, x, unsqueeze=True):
+        x = torch.tensor(x)
+        if unsqueeze:
+            x = torch.unsqueeze(x,0)
+        return x
+
+    def __len__(self):
+        return len(self.lst)
+
+    def __getitem__(self, idx):
+        flair, seg, slice = self.lst[idx][0], self.lst[idx][1], self.lst[idx][2]
+        flair_sample, _ = load(flair)
+        flair_sample = flair_sample[:,:,slice].astype(np.float32)
+        #make into 3-channel image
+        #flair_sample = np.stack((flair_sample,flair_sample,flair_sample),axis=0)
+        seg = torch.tensor((seg>0).astype(np.float32))
+        
+        flair_sample = self.np2tensor(flair_sample)
+        flair_sample = self.transform(flair_sample)
+        flair_sample = self.normalize(flair_sample)
+
+        seg = self.np2tensor(seg)
+        seg = self.transform(seg)
+        
+        return flair_sample, seg
+
+#IMAGE Segmentation for BRATS
+class MedSegDataset(Dataset):
+    def __init__(
+        self,
+        config,
+        mri_files,
+        train=True
+    ):
+        self.config = config
+        self.mris = mri_files
+        self.train = train
+        self.lst = []
+        for mri in self.mris:
+            flair = glob.glob(mri + '/VSD.Brain.XX.O.MR_Flair/*.mha')[0]
+            seg = glob.glob(mri + 'VSD.Brain_*more.XX*/*.mha')[0]
+
+            seg, _ = load(seg)
+            self.cnt = 0
+            self.total = 28
+            low,high,skip = 60,140,3
+            for i in range(low, high, skip):
+                slice = seg[:,:,i]
+                if len(np.unique(slice)) > 1:
+                    self.lst.append([flair,slice,i])
+                #else:
+                #    self.lst_healthy.append([flair,slice,i])
+
+        #print(len(self.lst_tumor), len(self.lst_healthy))
+        #self.lst = self.lst_tumor #+ self.lst_healthy
+                
+
+    def transform(self, img, size=(224,224)):
+        transform = T.Compose([
+            T.CenterCrop(size)])
+            #T.RandomHorizontalFlip(),
+            #T.RandomVerticalFlip()])
+        return transform(img)
+        
+    def normalize(self, img):
+        
+        img = (img - self.config['mean_flair'])/(self.config['std_flair'])
+        
+        return img
+    
+    def np2tensor(self, x, unsqueeze=True):
+        x = torch.tensor(x)
+        if unsqueeze:
+            x = torch.unsqueeze(x,0)
+        return x
+
+    def __len__(self):
+        return len(self.lst)
+
+    def __getitem__(self, idx):
+        flair, seg, slice = self.lst[idx][0], self.lst[idx][1], self.lst[idx][2]
+        flair_sample, _ = load(flair)
+        flair_sample = flair_sample[:,:,slice].astype(np.float32)
+        #make into 3-channel image
+        #flair_sample = np.stack((flair_sample,flair_sample,flair_sample),axis=0)
+        seg = torch.tensor((seg>0).astype(np.float32))
+        
+        flair_sample = self.np2tensor(flair_sample)
+        flair_sample = self.transform(flair_sample)
+        flair_sample = self.normalize(flair_sample)
+
+        seg = self.np2tensor(seg)
+        seg = self.transform(seg)
+        
+        return flair_sample, seg
+
+
 class MNIST(Dataset):
     def __init__(
         self,
@@ -369,34 +766,38 @@ class MNIST(Dataset):
                 if self.cnt == len(self.lst):
                     break
                             
-    def transform(self, img, size=(24, 24)):
+    def transform(self, img, size=(28, 28)):
         #create transform for MNIST
         if self.train:
-            T = transforms.Compose([
-                #convert torch tensor to PIL image
-                transforms.ToPILImage(),
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomVerticalFlip(),
-                transforms.ToTensor()
-            ])
+            if self.config['augmentations']:
+                T = transforms.Compose([
+                    transforms.RandomRotation(15),
+                    transforms.RandomVerticalFlip()
+                    #convert torch tensor to PIL image
+                    #transforms.ToPILImage(),
+                    #transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                ])
+            else:
+                T = transforms.Compose([
+                ])
         else:
-            T = transforms.Compose([
-                transforms.ToPILImage(),
-                transforms.ToTensor()
-            ])
+            T = transforms.Compose([])
         return T(img)
     
     def np2tensor(self, x):
-        x = torch.tensor(x)
+        x = torch.tensor(x).float().unsqueeze(0)
         return x
     
+    def convert2rgb(self, x):
+        x = np.stack((x,)*3, axis=0)
+        return x
     def add_noise(self, x):
         x = x + torch.randn(x.size()) * self.std + self.mean
         return x
     
     def normalize(self, x):
-        return (x - x.min())/(x.max() - x.min())
-    
+        return 2*(x/255.0) #(x - x.min())/(x.max() - x.min())
+        #return (x - self.config['mean_mnist'])/(self.config['std_mnist'])
     def __len__(self):
         return len(self.lst)
 
@@ -406,15 +807,16 @@ class MNIST(Dataset):
         label = self.np2tensor(label)
         img = self.transform(img)
         #downsample img
-        img_down = img[:,::2,::2] #28x28 -> 10x10
-        #img_down = self.add_noise(img_down)
+        if len(img.shape) == 2:
+            img = img.unsqueeze(0).unsqueeze(0)
+        elif len(img.shape) == 3:
+            img = img.unsqueeze(0)
+        #img_down = F.interpolate(img, size=(img.shape[-1]//2, img.shape[-1]//2), mode='bilinear', align_corners=False)
+        img_down = img[:,::2,::2] #28x28 -> 14x14
         #upsample img
-        img_down = img_down.unsqueeze(0)
         img_down = F.interpolate(img_down, size=(img.shape[-1], img.shape[-1]), mode='bilinear', align_corners=False)
-        img_down = self.add_noise(img_down)
-        #if self.train:
-        #img_down = self.add_noise(img_down)
-        #img_down = self.normalize(img_down)
+        img_down = self.normalize(img_down)
+        img = self.normalize(img)
 
         if len(img.shape) == 4:
             img = img.squeeze(0)
@@ -422,3 +824,4 @@ class MNIST(Dataset):
             img_down = img_down.squeeze(0)
   
         return img, img_down, label
+

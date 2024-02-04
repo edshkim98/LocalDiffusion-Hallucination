@@ -26,12 +26,12 @@ from ema_pytorch import EMA
 from accelerate import Accelerator
 
 from attend import Attend
-from data import IQTDataset, MedDataset, MNIST
+from data import MedDataset, MedDataset_png, MNIST, MvtecDataset
 import pandas as pd
 import glob
 from unet_model import ResUnet
+import yaml
 import idx2numpy
-
 # from denoising_diffusion_pytorch.version import __version__
 
 # constants
@@ -39,6 +39,12 @@ import idx2numpy
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
 # helpers functions
+
+def right_pad_dims_to(x, t):
+    padding_dims = x.ndim - t.ndim
+    if padding_dims <= 0:
+        return t
+    return t.view(*t.shape, *((1,) * padding_dims))
 
 def exists(x):
     return x is not None
@@ -268,7 +274,7 @@ class Unet(nn.Module):
         dim,
         init_dim = None,
         out_dim = None,
-        dim_mults = (1, 2, 4),
+        dim_mults = (1, 2, 4, 8),
         channels = 1,
         self_condition = False,
         cond_img = True,
@@ -280,13 +286,15 @@ class Unet(nn.Module):
         sinusoidal_pos_emb_theta = 10000,
         attn_dim_head = 32,
         attn_heads = 4,
-        full_attn = (False, False, True),
-        flash_attn = False
+        full_attn = (False, False, False, True),
+        flash_attn = False,
+        mode = 'mri'
     ):
         super().__init__()
 
         # determine dimensions
-        self.cond_model = ResUnet()
+        self.mode = mode
+        self.cond_model = ResUnet(data=self.mode)
         self.channels = channels
         self.self_condition = self_condition
         self.cond_img = cond_img
@@ -380,7 +388,6 @@ class Unet(nn.Module):
 
     def forward(self, x, cond_img, time, x_self_cond = None):
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
-
         if self.self_condition:
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
             x = torch.cat((x_self_cond, x), dim = 1)
@@ -494,7 +501,11 @@ class GaussianDiffusion(nn.Module):
         assert not model.random_or_learned_sinusoidal_cond
         
         self.config = config
+        self.branch_out = self.config['branch_out']
+        self.start_intermediate = self.config['start_intermediate']
         self.model = model
+        self.lst = []
+        self.cnt = -1
 
         self.channels = self.model.channels
         self.self_condition = self.model.self_condition
@@ -615,7 +626,11 @@ class GaussianDiffusion(nn.Module):
             extract(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
         )
-
+    
+    def gaussian_pdf(self, x, mean, log_variance):
+        std = torch.exp(0.5 * log_variance)
+        return (1/(std * math.sqrt(2 * math.pi))) * torch.exp(-0.5 * ((x - mean) / std)**2)
+    
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
             extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
@@ -625,40 +640,86 @@ class GaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def model_predictions(self, x, cond_img, t, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
-        
-        model_output = self.model(x, cond_img, t, x_self_cond)
-        
-        #MASK X if True
-        if (self.config['mask_cond'] and self.config['mask_x']):
-            
-            mask = torch.zeros_like(cond_img)
-            length = mask.shape[-1]
-            mask[:,:,:,length//2:] = 1.0 #COND_IN
-            if self.config['cond'] == 'IN':
-                if self.config['mask_x_inv']:
-                    mask = 1. - mask 
-            else:
-                if not self.config['mask_x_inv']:
-                    mask = 1. - mask
-            model_output = model_output * mask
+    def model_predictions(self, x, mask, min_max_val, cond_img, t, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False, device=None):
+        if self.config['branch_out']:
+            #if branch_out, cond_img is originally a full condition, mask is probability-based mask
+            #mask1 = torch.clip(mask, 0.2, 1.0).to(device)
+            cond_out = cond_img * mask.to(device)
+            #cond_out = F.interpolate(cond_out, scale_factor=5, mode='bilinear',align_corners=False)
+            #mask_out =  F.interpolate(mask, scale_factor=5, mode='nearest')
+            # mask = torch.where(mask < 0.9, 0.0, mask) #0.7
+            mask2 = (1. - mask)
+            mask2 = torch.clip(mask2, 0.9, 1.0).to(device)
 
-        maybe_clip = partial(torch.clamp, min = 0., max = 1.) if clip_x_start else identity
+            cond_in = cond_img * mask2
+            cond_in = cond_in.to(torch.float32)
+            cond_out = cond_out.to(torch.float32)
+            self.cond_out = cond_out
+
+            np.save('lr_out.npy', cond_out.cpu().detach().numpy())
+            np.save('lr_in.npy', cond_in.cpu().detach().numpy())
+            #binarize the mask
+            mask = (mask >= 1.0).to(torch.float32)
+            x_out, x_in = x[0], x[1]
+            #x_out_up =  F.interpolate(x_out, scale_factor=5, mode='bilinear',align_corners=False)
+            model_output_out = self.model(x_out, cond_out, t, x_self_cond)
+            #model_output_out = F.interpolate(model_output_out, scale_factor=0.2, mode='bilinear',align_corners=False)
+            model_output_in = self.model(x_in, cond_in, t, x_self_cond)
+
+            if self.config['mask_x']:
+                assert len(torch.unique(mask)) == 2, 'mask should be binary {}'.format(torch.unique(mask))
+
+                model_output_out = model_output_out.cpu()*mask.cpu()
+
+                model_output_out = torch.where(mask.cpu() == 0., torch.tensor(min_max_val[0]), model_output_out)
+                model_output_out = model_output_out.to(device) 
+                model_output_out = 0.5*model_output_out + 0.5*self.cond_out 
+                
+                mask = 1. - mask
+                model_output_in = model_output_in.to(device)
+
+                if self.t == 0:
+                    np.save('pred_out.npy', model_output_out.cpu().detach().numpy())
+                    np.save('pred_in.npy', model_output_in.cpu().detach().numpy())
+
+        else:
+            model_output = self.model(x, cond_img, t, x_self_cond)
+            if not self.branch_out:
+                if self.t == self.num_timesteps:
+                    if self.config['mask_x']:
+                        assert len(torch.unique(mask)) == 2, 'mask should be binary'
+ 
+                        model_output = torch.where(mask.cpu() == 0., torch.tensor(min_max_val[0]), model_output)
+                        model_output = model_output.to(device)     
+
+        if self.config['branch_out']:
+            maybe_clip_out = partial(torch.clamp, min = min_max_val[0], max = min_max_val[1]) if clip_x_start else identity
+            maybe_clip_in = partial(torch.clamp, min = min_max_val[0], max = min_max_val[1]) if clip_x_start else identity
+        else:
+            maybe_clip = partial(torch.clamp, min = min_max_val[0], max = min_max_val[1]) if clip_x_start else identity          
 
         if self.objective == 'pred_noise':
             pred_noise = model_output
             x_start = self.predict_start_from_noise(x, t, pred_noise)
-            #if background_mask is not None:
-            #    x_start = x_start * background_mask
             x_start = maybe_clip(x_start)
 
             if clip_x_start and rederive_pred_noise:
                 pred_noise = self.predict_noise_from_start(x, t, x_start)
 
         elif self.objective == 'pred_x0':
-            x_start = model_output
-            x_start = maybe_clip(x_start)
-            pred_noise = self.predict_noise_from_start(x, t, x_start)
+            if self.config['branch_out']:
+                x_start_out = model_output_out
+                x_start_out = maybe_clip_out(x_start_out)
+                pred_noise_out = self.predict_noise_from_start(x_out, t, x_start_out)
+
+                x_start_in = model_output_in
+                x_start_in = maybe_clip_in(x_start_in)
+                pred_noise_in = self.predict_noise_from_start(x_in, t, x_start_in)
+
+            else:
+                x_start = model_output
+                x_start = maybe_clip(x_start)
+                pred_noise = self.predict_noise_from_start(x, t, x_start)
 
         elif self.objective == 'pred_v':
             v = model_output
@@ -666,56 +727,171 @@ class GaussianDiffusion(nn.Module):
             x_start = maybe_clip(x_start)
             pred_noise = self.predict_noise_from_start(x, t, x_start)
 
+        if self.config['branch_out']:
+            return ModelPrediction(pred_noise_out, x_start_out), ModelPrediction(pred_noise_in, x_start_in)
+
         return ModelPrediction(pred_noise, x_start)
 
-    def p_mean_variance(self, x, cond_img, t, x_self_cond = None, clip_denoised = True):
-        preds = self.model_predictions(x, cond_img, t, x_self_cond)
-        x_start = preds.pred_x_start
+    def p_mean_variance(self, x, mask, min_max_val, cond_img, t, x_self_cond = None, clip_denoised = True, device = None):
+        if self.config['branch_out']:
+            preds_out, preds_in = self.model_predictions(x, mask, min_max_val, cond_img, t, x_self_cond, device=device)
+            x_start_out = preds_out.pred_x_start
+            x_start_in = preds_in.pred_x_start
+            if clip_denoised:
+                
+                self.s = 0#torch.quantile(x_start_out.reshape(1,-1).abs(), 1.0, dim = -1)
+                if self.s > min_max_val[1]:
+                    self.s = right_pad_dims_to(x_start_out, self.s)
+                    x_start_out = x_start_out.clamp(None, self.s) / (0.5*self.s)
+                    #x_start_out = x_start_out * self.cond_out.max()
 
-        if clip_denoised:
-            x_start.clamp_(0, 1.)
+                    x_start_out.clamp_(min_max_val[0], min_max_val[1])
+                # else:
+                x_start_out.clamp_(min_max_val[0],  min_max_val[1])#cond_img.max())      
+                x_start_in.clamp_(min_max_val[0], min_max_val[1])
 
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)
+            if (self.t == self.config['start_timestep']-1) and (self.config['start_intermediate']):
+                self.config['branch_out'] = False
+                self.config['mask_x'] = False
+                x_start = x_start_out + x_start_in
+
+                #binarize the mask
+                mask = (mask > 0.).to(torch.float32)
+
+                x_out = x[0] * mask.to(device)
+                x_in = x[1] * (1. - mask.to(device))
+                assert torch.any((x_out == 0.)) and torch.any((x_in == 0.)), 'x_out and x_in should be masked'
+                x = torch.where(x_out == 0., x_in, x_out)
+                self.x = x
+                self.x_start_skip = x_start.clone()
+
+                if clip_denoised:
+                    x_start.clamp_(min_max_val[0], min_max_val[1])#(-1., 1.)
+
+                if self.viz:
+                    np.save('pred_concat_'+str(self.cnt)+'.npy', x_start.cpu().detach().numpy())
+                    #np.save('cond_'+str(self.cnt)+'.npy', cond_img.cpu().detach().numpy())
+
+                model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)
+                return model_mean, posterior_variance, posterior_log_variance, x_start
+            
+            model_mean_out, posterior_variance_out, posterior_log_variance_out = self.q_posterior(x_start = x_start_out, x_t = x[0], t = t)
+            model_mean_in, posterior_variance_in, posterior_log_variance_in = self.q_posterior(x_start = x_start_in, x_t = x[1], t = t)
+
+            return (model_mean_out, model_mean_in), (posterior_variance_out, posterior_variance_in), (posterior_log_variance_out, posterior_log_variance_in), (x_start_out, x_start_in)
+        else:
+            preds = self.model_predictions(x, mask, min_max_val, cond_img, t, x_self_cond, device=device)
+            x_start = preds.pred_x_start
+        
+            if clip_denoised:
+                x_start.clamp_(min_max_val[0], min_max_val[1])#(-1., 1.)
+
+            if (self.t < self.config['start_timestep']-1) and (self.config['start_intermediate']) and (self.branch_out):
+
+                # if self.t != 0:
+                #     self.s = torch.quantile(x_start.reshape(1,-1).abs(), 0.9999, dim = -1)
+                #     self.s.clamp_(min = min_max_val[1])
+                #     self.s = right_pad_dims_to(x_start, self.s)
+                #     x_start = x_start.clamp(None, self.s) / (0.5*self.s)
+                #     x_start = x_start.clamp_(min_max_val[0], min_max_val[1])
+                # else:
+                #     x_start = x_start.clamp_(min_max_val[0], min_max_val[1])
+
+                coeff =  (1/30) * self.t #+ 0.1
+                x_start = coeff * self.x_start_skip + (1. - coeff) * x_start
+                x_start = x_start.clamp_(min_max_val[0], min_max_val[1])
+
+                
+            model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.inference_mode()
-    def p_sample(self, x, cond_img, t: int, x_self_cond = None):
-        b, *_, device = *x.shape, self.device
-        batched_times = torch.full((b,), t, device = device, dtype = torch.long)
-        '''
-        #create a binary mask where 0 if pixel is 0 and 1 if pixel is present
-        if background_mask:
-            mask = torch.zeros_like(cond_img)
-            length = mask.shape[-1]
-            mask[:,:,:,length//2:] = 1.0
-            cond_img = cond_img * mask
-            #mask = 1. - mask
+    def p_sample(self, x, mask, min_max_val, cond_img, t: int, x_self_cond = None):
+        self.x = x
+        if self.config['branch_out']:
+            sample_img = x[0]
+            b, *_, device = *sample_img.shape, self.device
         else:
-            mask = None
-        ''' 
-        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, cond_img = cond_img, t = batched_times, x_self_cond = x_self_cond, clip_denoised = True)
-        noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
-        pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
-        return pred_img, x_start
+            b, *_, device = *x.shape, self.device
+        batched_times = torch.full((b,), t, device = device, dtype = torch.long)
+
+        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, mask = mask, min_max_val = min_max_val, cond_img = cond_img, t = batched_times, x_self_cond = x_self_cond, clip_denoised = True,  device = device)
+        if self.config['branch_out']:
+            noise = torch.randn_like(x[0]) if t > 0 else 0. # no noise if t == 0
+            pred_img_out = model_mean[0] + (0.5 * model_log_variance[0]).exp() * noise
+            pred_img_in = model_mean[1] + (0.5 * model_log_variance[1]).exp() * noise
+            confidence = torch.tensor(0.)
+            stats = (torch.rand_like(model_mean[0].cpu()).squeeze(1), torch.rand_like(model_log_variance[0].cpu()).squeeze(1))
+            return [pred_img_out, pred_img_in], x_start, confidence, stats
+        else:
+            noise = torch.randn_like(self.x) if t > 0 else 0. # no noise if t == 0
+            pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
+            #if self.t == self.config['start_timestep']-1:
+                #if self.viz:
+                 #   np.save('noisy_x_'+str(self.cnt)+'.npy', pred_img.cpu().detach().numpy())
+            confidence = self.gaussian_pdf(pred_img, model_mean, model_log_variance)
+            stats = (model_mean.cpu().squeeze(1), (0.5*model_log_variance.cpu().squeeze(1)).exp())
+        return pred_img, x_start, confidence, stats
 
     @torch.inference_mode()
-    def p_sample_loop(self, cond_img, shape, return_all_timesteps = False):
+    def p_sample_loop(self, cond_img, mask, min_max_val, shape, return_all_timesteps = False, return_all_outputs = False):
         batch, device = shape[0], self.device
         
         torch.manual_seed(42)      
         img = torch.randn(shape, device = device)
-        imgs = [img]
 
+        if self.start_intermediate:
+
+            if self.config['use_gt']:
+                #t starts in reverse order: e.g. 9 . 8 .... 0
+                t = torch.tensor(self.config['use_gt_timestep'], device=device).long() #torch.randint(0, self.num_timesteps, (batch,), device=device).long()
+                t = torch.stack([t for _ in range(batch)], dim=0)
+                img = self.q_sample(x_start = cond_img, t = t, noise = img)
+                self.num_timesteps = self.config['use_gt_timestep']
+
+        imgs = [img]
+        confidence_map = []
+        stats_mean_lst = []
+        stats_std_lst = []
+        x_start_lst = []
         x_start = None
 
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps, disable=True):
+            self.t = t
             self_cond = x_start if self.self_condition else None
-            img, x_start = self.p_sample(img, cond_img, t, self_cond)
-            imgs.append(img)
+            if self.config['branch_out']:
+                if self.t == self.num_timesteps-1:
+                    img = [img, img]                
+            img, x_start, confidence, stats = self.p_sample(img, mask, min_max_val, cond_img, t, self_cond)
+            if self.config['branch_out']:
+                imgs.append([img[0].cpu(), img[1].cpu()])
+                if self.t == 0:
+                    np.save('pred_out2.npy', img[0].cpu().detach().numpy())
+                    np.save('pred_in2.npy', img[1].cpu().detach().numpy())
+                x_start_lst.append([x_start[0].cpu(), x_start[1].cpu()])
+            else:
+                imgs.append(img)
+                x_start_lst.append(x_start.cpu())
+            confidence_map.append(confidence.cpu())
+            stats_mean_lst.append(stats[0].numpy())
+            stats_std_lst.append(stats[1].numpy())
+
+        stats_mean = np.mean(np.array(stats_mean_lst), axis=0)
+        stats_std = np.mean(np.array(stats_std_lst), axis=0)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
+        if not self.start_intermediate:
+            if self.branch_out:
+                if isinstance(ret, list):
+                    ret = torch.stack(ret, dim=0)
+                else:
+                    ret = torch.stack((ret, ret), dim=0)
 
         ret = self.unnormalize(ret)
+        if return_all_outputs:
+            return ret, x_start_lst, confidence_map, stats_mean, stats_std
+        print("Ret shape: ", ret.shape)
+        print("Ret min {} max {}".format(torch.min(ret), torch.max(ret)))
         return ret
 
     @torch.inference_mode()
@@ -761,10 +937,51 @@ class GaussianDiffusion(nn.Module):
         return ret
 
     @torch.inference_mode()
-    def sample(self, cond_img, batch_size = 16, return_all_timesteps = False):
+    def sample(self, cond_img, gt, batch_size = 16, return_all_timesteps = False, return_all_outputs = False,  mask = None, ood_confidence_ad=False, min_max_val = None):
+        self.cnt += 1
+        #print("MIN {} MAX {}".format(min_max_val[0], min_max_val[1]))
+        if self.config['ood_AD']:
+            if len(torch.unique(mask)) != 1:
+                self.viz = True
+            else:
+                self.viz = False
+        else:
+            self.viz = False
+        print("CNT: ", self.cnt)
+        if self.config['branch_out'] == False:
+            self.config['branch_out'] = self.branch_out
+        
+        if self.config['start_intermediate'] == False:
+            self.config['start_intermediate'] = self.start_intermediate
+
+        if self.config['start_intermediate']:
+            self.start_intermediate = True
+            if self.config['use_gt']:
+                self.hr = gt
+        else:
+            self.start_intermediate = False
+
+        if (self.config['ood_AD'] == True) or (self.config['ood_confidence'] == True):
+            self.config['mask_cond'] = True
+            self.config['mask_x'] = True
+        #else:
+        #    self.config['mask_cond'] = False
+        #    self.config['mask_x'] = False
+
+        if self.config['branch_out']:
+            if len(torch.unique(mask)) == 1:
+                if torch.unique(mask) == 1:
+                    print("Original reverse process as AD is low")
+                    self.config['mask_cond'] = False
+                    self.config['mask_x'] = False
+                    self.config['branch_out'] = False
+                    self.config['start_intermediate'] = False
+                
+        print("Branch: {} | Start Intermediate: {} | Mask Cond: {} | Mask X: {}".format(self.config['branch_out'], self.config['start_intermediate'], self.config['mask_cond'], self.config['mask_x']))
+
         image_size, channels = self.image_size, self.channels
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        return sample_fn(cond_img, (batch_size, channels, image_size, image_size), return_all_timesteps = return_all_timesteps)
+        return sample_fn(cond_img, mask, min_max_val, (batch_size, channels, image_size, image_size), return_all_timesteps = return_all_timesteps, return_all_outputs = return_all_outputs)
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
@@ -944,39 +1161,90 @@ class Trainer(object):
 
         self.max_grad_norm = max_grad_norm
 
-        # dataset and dataloader
-        mri_files = self.config['mnist_path']
-        mri_files = idx2numpy.convert_from_file(mri_files).shape[0]
-        mri_files = np.arange(mri_files)
-        #shuffle mri_files
-        np.random.seed(42)
-        np.random.shuffle(mri_files)
-        #split mri_files into train, validation and test in 70:15:15 ratio
-        train_split = int(0.8 * len(mri_files))
+        if self.config['data'] == 'mri':
+            # dataset and dataloader (if png, mri_files is a list of flair png files)
+            mri_files = self.config['mri_files']
+            mri_files = np.array(glob.glob(mri_files))
+            #shuffle mri_files
+            np.random.seed(42)
+            np.random.shuffle(mri_files)
+            #split mri_files into train, validation and test in 70:15:15 ratio
+            train_split = int(0.8 * len(mri_files))
+            mri_files_train = mri_files[:train_split]
+            mri_files_test = mri_files[train_split:]
         
-        mri_files = idx2numpy.convert_from_file(self.config['mnist_path'])
-        mri_files_labels = idx2numpy.convert_from_file(self.config['mnist_labels_path'])
-        mri_files_train = mri_files[:train_split]
-        mri_labels_train = mri_files_labels[:train_split]
-        mri_files_test = mri_files[train_split:]
-        mri_labels_test = mri_files_labels[train_split:]
+            if self.config['train']:  
+                self.ds = MedDataset_png(self.config, mri_files_train, train=True) 
+                self.ds_test = MedDataset_png(self.config, mri_files_test, train=False)
+
+                dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+                dl_test = DataLoader(self.ds_test, batch_size = train_batch_size, shuffle = False, pin_memory = True, num_workers = cpu_count())
+
+                data = next(iter(dl))
+                data2 = next(iter(dl_test))
+                print("Train: {} Vali: {}".format(len(dl), len(dl_test)))
+                print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
+                print("Min: {} Max: {}".format(data[0].min(), data[0].max()))
+
+        elif self.config['data'] == 'mnist':
+            # dataset and dataloader
+            mri_files = self.config['mnist_path']
+            mri_files = idx2numpy.convert_from_file(mri_files).shape[0]
+            mri_files = np.arange(mri_files)
+            #shuffle mri_files
+            np.random.seed(42)
+            np.random.shuffle(mri_files)
+            #split mri_files into train, validation and test in 70:15:15 ratio
+            train_split = int(0.7 * len(mri_files))
         
-        if self.config['train']:  
-            self.ds = MNIST(self.config, mri_files_train, mri_labels_train, train=True, num=8) 
-            self.ds_test = MNIST(self.config, mri_files_test, mri_labels_test, train=False, num=8)
+            mri_files = idx2numpy.convert_from_file(self.config['mnist_path'])
+            mri_files_labels = idx2numpy.convert_from_file(self.config['mnist_labels_path'])
+            mri_files_train = mri_files[:train_split]
+            mri_labels_train = mri_files_labels[:train_split]
+            mri_files_test = mri_files[train_split:]
+            mri_labels_test = mri_files_labels[train_split:]
+        
+            if self.config['train']:  
+                self.ds = MNIST(self.config, mri_files_train, mri_labels_train, train=True, num=8, max_file=200) 
+                self.ds_test = MNIST(self.config, mri_files_test, mri_labels_test, train=False, num=8, max_file=100)
 
-            dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
-            dl_test = DataLoader(self.ds_test, batch_size = train_batch_size, shuffle = False, pin_memory = True, num_workers = cpu_count())
+                dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+                dl_test = DataLoader(self.ds_test, batch_size = train_batch_size, shuffle = False, pin_memory = True, num_workers = cpu_count())
 
-            data = next(iter(dl))
-            data2 = next(iter(dl_test))
-            print("Train: {} Vali: {}".format(len(dl), len(dl_test)))
-            print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
+                data = next(iter(dl))
+                data2 = next(iter(dl_test))
+                print("Train: {} Vali: {}".format(len(dl), len(dl_test)))
+                print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
+                print("Min: {} Max: {}".format(data[0].min(), data[0].max()))
 
-        # dl = self.accelerator.prepare(dl)
-        # self.dl = cycle(dl)
-            self.dl = dl
-            self.dl_test = dl_test
+        elif self.config['data'] == 'mvtec':
+            # dataset and dataloader
+            mri_files = self.config['mvtec_path']
+            mri_files = np.array(glob.glob(mri_files))
+            #shuffle mri_files
+            np.random.seed(42)
+            np.random.shuffle(mri_files)
+            #split mri_files into train, validation and test in 70:15:15 ratio
+            train_split = int(0.7 * len(mri_files))
+            mri_files_train = mri_files[:train_split]
+            mri_files_test = mri_files[train_split:]
+            
+            if self.config['train']:  
+                self.ds = MvtecDataset(mri_files_train, train=True)  
+                self.ds_test = MvtecDataset(mri_files_test, train=True)
+
+                dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+                dl_test = DataLoader(self.ds_test, batch_size = train_batch_size, shuffle = False, pin_memory = True, num_workers = cpu_count())
+
+                data = next(iter(dl))
+                data2 = next(iter(dl_test))
+                print("Train: {} Vali: {}".format(len(dl), len(dl_test)))
+                print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
+                print("Min: {} Max: {}".format(data[0].min(), data[0].max()))
+
+        if self.config['train']:
+             self.dl = dl
+             self.dl_test = dl_test
 
         # optimizer
 
@@ -990,7 +1258,9 @@ class Trainer(object):
         self.results_folder_string = results_folder+self.config['ProjectName']
         self.results_folder = Path(results_folder+self.config['ProjectName'])
         self.results_folder.mkdir(exist_ok = True)
-
+        # Save the dictionary as a yaml file
+        with open(self.results_folder_string+'/config.yaml', 'w') as yaml_file:
+            yaml.dump(configs, yaml_file)
         # step counter state
 
         self.step = 0
@@ -1007,10 +1277,23 @@ class Trainer(object):
 
         self.df = pd.DataFrame(columns = ['epoch', 'loss'])
         self.df_train = pd.DataFrame(columns = ['epoch', 'loss'])
-
-        self.max_val = (4096-self.config['mean_flair'])/self.config['std_flair']
-        self.min_val = (0-self.config['mean_flair'])/self.config['std_flair']
-        self.min_max_val = (self.min_val, self.max_val)
+       
+        if self.config['data'] == 'mri': 
+            if not self.config['translate_zero']:
+                self.max_val = 1.0 #(4096-self.config['mean_flair'])/self.config['std_flair']
+                self.min_val = -1.0 #(0-self.config['mean_flair'])/self.config['std_flair']
+            else:
+                self.min_val2 = (0-self.config['mean_flair'])/self.config['std_flair'] 
+                self.min_val = 0.
+                self.max_val = (4096-self.config['mean_flair'])/self.config['std_flair']
+                self.max_val = self.max_val + torch.abs(torch.tensor(self.min_val2))
+        elif self.config['data'] == 'mnist':
+            self.min_val = 0.
+            self.max_val = 1.0
+        elif 'mvtec' in self.config['data']:
+            self.min_val = 0.
+            self.max_val = 2.0
+        self.min_max_val = (self.min_val, self.max_val) 
 
     @property
     def device(self):
@@ -1049,13 +1332,16 @@ class Trainer(object):
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
+    #write a function that always returns a multiple of 1000
+    def round_num(self, x, num=1000):
+        return int(np.ceil(x/num))*num
 
     def train(self):
         accelerator = self.accelerator
         device = accelerator.device
-
+        
         with tqdm(initial = self.step, total = self.train_num_steps, disable = True) as pbar:
-
+            
             while self.step < self.train_num_steps:
 
                 total_loss = 0.
@@ -1101,7 +1387,7 @@ class Trainer(object):
                                 hr = hr.to(device)
                                 lr = lr.to(device)
                                 #loss = self.model.sample(hr,lr, train=False)
-                                out = self.ema.ema_model.sample(lr, batch_size=lr.shape[0], return_all_timesteps = False) #(lr, batch_size=lr.shape[0])
+                                out = self.ema.ema_model.sample(lr, batch_size=lr.shape[0], mask = None, return_all_timesteps = False, min_max = self.min_max_val)
                                 #lst.append(loss.cpu().detach().numpy())
                                 lst.append(torch.nn.MSELoss()(out, hr).cpu().detach().numpy())
 
@@ -1109,9 +1395,18 @@ class Trainer(object):
 
                         if self.best_ls > ls:
                             self.best_ls = ls
-                            self.save("best")
+                            if self.config['data'] == 'mnist':
+                                train_phase = self.round_num(self.step, num=100)
+                            elif self.config['data'] == 'mri':
+                                train_phase = self.round_num(self.step, num=500)
+                            elif self.config['data'] == 'mvtec':
+                                train_phase = self.round_num(self.step, num=500)
+                            self.save("best"+str(train_phase))
+                            np.save(self.results_folder_string+"/hr.npy", hr.cpu())
+                            np.save(self.results_folder_string+"/lr.npy", lr.cpu())
+                            np.save(self.results_folder_string+"pred.npy", out.cpu().detach())
+
                         self.df = self.df.append({'epoch': self.step, 'loss': ls}, ignore_index=True)
-                        #save self.df to csv
                         self.df.to_csv(self.results_folder_string+"/loss.csv")
                 pbar.update(1)
 

@@ -88,15 +88,19 @@ class Upsample_(torch.nn.Module):
         return self.upsample(x)
     
 class ResUnet(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, data='mri'):
         super(ResUnet, self).__init__()
         
-        self.in_channels = 1 #configs['model']['in_channel']
+        if (data == 'mvtecSR'):
+            self.in_channels = 3 #configs['model']['in_channel']
+        else:
+            self.in_channels = 1 #configs['model']['in_channel']
         self.filters = [32,32,64,128,256] #configs['model']['filters']
         self.stride = (1,1) #configs['model']['stride']
         #self.upsample = configs['model']['upsample']
         self.se = False #configs['model']['se']
         self.skip = True #configs['model']['residual']
+        self.data = data
 
         #Downsampling
         self.residual_conv1 = torch.nn.Sequential(
@@ -107,35 +111,12 @@ class ResUnet(torch.nn.Module):
         
         self.residual_conv3 = torch.nn.Sequential(
             BasicBlock(self.filters[2], self.filters[2], self.filters[3], tuple(self.stride), 1, residual=self.skip, se=self.se))
-
-       # self.mid_conv = torch.nn.Sequential(
-       #     BasicBlock(self.filters[3], self.filters[3], self.filters[4], (1,1), 1, residual=self.skip, se=self.se))
+        if (self.data == 'mri') or (data == 'mvtec'):
+            self.mid_conv = torch.nn.Sequential(
+                BasicBlock(self.filters[3], self.filters[3], self.filters[4], (1,1), 1, residual=self.skip, se=self.se))
         
         self.maxpool = nn.MaxPool2d(2)
-        '''
-        #Upsampling
-        if self.upsample == 'interpolation':
-            self.upsample1 = Upsample_()
-            self.upsample2 = Upsample_()
-        elif self.upsample == 'transpose':
-            self.upsample1 = Upsample(self.filters[4], self.filters[4])
-            self.upsample2 = Upsample(self.filters[3], self.filters[3])
-            self.upsample3 = Upsample(self.filters[2], self.filters[2])
 
-        self.up_residual_conv1 = torch.nn.Sequential( 
-            BasicBlock(self.filters[4] + self.filters[3], self.filters[3], self.filters[3], 1, 1, residual=self.skip, se=self.se),
-        )
-        self.up_residual_conv2 = torch.nn.Sequential( 
-            BasicBlock(self.filters[3] + self.filters[2], self.filters[2], self.filters[2], 1, 1, residual=self.skip, se=self.se),
-        )
-        self.up_residual_conv3 = torch.nn.Sequential( 
-            BasicBlock(self.filters[2] + self.filters[1], self.filters[1], self.filters[1], 1, 1, residual=self.skip, se=self.se),
-        )
-
-        self.output_layer = torch.nn.Sequential(
-            torch.nn.Conv3d(self.filters[1], self.in_channels, kernel_size=1, padding=0),
-        )
-        '''       
     def forward(self, x):
                 
         x2_conv = self.residual_conv1(x) #16
@@ -145,177 +126,10 @@ class ResUnet(torch.nn.Module):
         x3 = self.maxpool(x3_conv)
 
         x4_conv = self.residual_conv3(x3) #8
-        #x4 = self.maxpool(x4_conv)
+        if (self.data == 'mnist') or (self.data == 'mvtecSR'):
+            return x4_conv
+        x4 = self.maxpool(x4_conv)
 
-        #x4 = self.mid_conv(x4) #8
-        '''
-        x5 = self.upsample1(x4) #8
-        x5 = torch.cat([x5, x4_conv], dim=1)
-        x5 = self.up_residual_conv1(x5)
-        
-        x6 = self.upsample2(x5) #16
-        x6 = torch.cat([x6, x3_conv], dim=1)
-        x6 = self.up_residual_conv2(x6)
+        x4 = self.mid_conv(x4) #8
 
-        x7 = self.upsample3(x6) #16
-        x7 = torch.cat([x7, x2_conv], dim=1)
-        x7 = self.up_residual_conv3(x7)
-        
-        out = self.output_layer(x7)
-        '''
-        return x4_conv
-    
-class Unet(torch.nn.Module):
-    def __init__(self, configs):
-        super(Unet, self).__init__()
-        
-        self.in_channels = configs['model']['in_channel']
-        self.filters = configs['model']['filters']
-        self.stride = [1,1,1]#configs['model']['stride']
-        self.upsample = configs['model']['upsample']
-        self.se = False #configs['model']['se']
-        self.skip = False #configs['model']['residual']
-
-        #Downsampling
-        self.stem = torch.nn.Conv3d(self.in_channels, self.filters[0], kernel_size=3, padding=1)
-        self.residual_conv1 = torch.nn.Sequential(
-            BasicBlock(self.filters[0] , self.filters[0], self.filters[0], tuple(self.stride), 1, residual=self.skip, se=self.se))
-        
-        self.residual_conv2 = torch.nn.Sequential(
-            BasicBlock(self.filters[0], self.filters[1], self.filters[1], tuple(self.stride), 1, residual=self.skip, se=self.se))
-        
-        self.mid_conv = torch.nn.Sequential(
-            BasicBlock(self.filters[1], self.filters[2], self.filters[2], (1,1,1), 1, residual=self.skip, se=self.se))
-        
-        self.maxpool = nn.MaxPool3d(2)
-
-        #Upsampling
-        if self.upsample == 'interpolation':
-            self.upsample1 = Upsample_()
-            self.upsample2 = Upsample_()
-        elif self.upsample == 'transpose':
-            self.upsample1 = Upsample(self.filters[2], self.filters[2])
-            self.upsample2 = Upsample(self.filters[1], self.filters[1])
-
-        self.up_residual_conv1 = torch.nn.Sequential( 
-            BasicBlock(self.filters[2] + self.filters[1], self.filters[1], self.filters[1], 1, 1, residual=self.skip, se=self.se),
-        )
-        self.up_residual_conv2 = torch.nn.Sequential( 
-            BasicBlock(self.filters[1] + self.filters[0], self.filters[0], self.filters[0], 1, 1, residual=self.skip, se=self.se),
-        )
-
-        self.output_layer = torch.nn.Sequential(
-            torch.nn.Conv3d(self.filters[0], self.in_channels, kernel_size=1, padding=0),
-        )
-                
-    def forward(self, x):
-        
-        x1 = self.stem(x)
-       
-        x2_conv = self.residual_conv1(x1) #16
-        x2 = self.maxpool(x2_conv)
-        
-        x3_conv = self.residual_conv2(x2) #8
-        x3 = self.maxpool(x3_conv)
-
-        x4 = self.mid_conv(x3) #8
-        
-        x5 = self.upsample1(x4) #8
-        x5 = torch.cat([x5, x3_conv], dim=1)
-        x5 = self.up_residual_conv1(x5)
-        
-        x6 = self.upsample2(x5) #16
-        x6 = torch.cat([x6, x2_conv], dim=1)
-        x6 = self.up_residual_conv2(x6)
-
-        out = self.output_layer(x6)
-        
-        return out
-    
-#######################################################
-# Implementation of 3D U-Net
-#######################################################
-
-class double_conv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        if self.in_channels == 1:
-            self.mid_channels = self.out_channels//2
-        else:
-            self.mid_channels = self.in_channels
-        self.block =  nn.Sequential(
-        nn.Conv3d(self.in_channels, self.mid_channels, 3, padding=1),
-        nn.BatchNorm3d(self.mid_channels),
-        nn.ReLU(),
-        nn.Conv3d(self.mid_channels, self.out_channels, 3, padding=1),
-        nn.BatchNorm3d(self.out_channels),
-        nn.ReLU()
-        )
-
-    def forward(self, x):
-        return self.block(x)   
-
-class UNet3D(nn.Module):
-
-    def __init__(self, in_channels, filters=[64,128,256,512]):
-        super().__init__()
-        
-        self.filters = filters
-        #self.init_conv = nn.Conv3d(in_channels, self.filters[0], kernel_size=3, padding=1)
-        self.conv_down1 = double_conv(in_channels, self.filters[0])
-        self.conv_down2 = double_conv(self.filters[0], self.filters[1])
-        self.conv_down3 = double_conv(self.filters[1], self.filters[2])
-
-        self.mid_conv = double_conv(self.filters[2], self.filters[3])
-
-        self.maxpool = nn.MaxPool3d(2)
-
-        self.upsample1 = Upsample(self.filters[3], self.filters[3])
-        self.upsample2 = Upsample(self.filters[2], self.filters[2])
-        self.upsample3 = Upsample(self.filters[1], self.filters[1])
-        
-        self.dconv_up3 = double_conv(self.filters[3] + self.filters[2], self.filters[2])
-        self.doncv_up3_2 = double_conv(self.filters[2], self.filters[2])
-        self.dconv_up2 = double_conv(self.filters[2] + self.filters[1], self.filters[1])
-        self.doncv_up2_2 = double_conv(self.filters[1], self.filters[1])
-        self.dconv_up1 = double_conv(self.filters[1] + self.filters[0], self.filters[0])
-        self.dconv_up1_2 = double_conv(self.filters[0], self.filters[0])
- 
-        self.conv_last = nn.Conv3d(self.filters[0], in_channels, 1, padding=0)
-        
-        
-    def forward(self, x):
-
-        #x = self.init_conv(x)
-        
-        conv1 = self.conv_down1(x)
-        x = self.maxpool(conv1) #16
-
-        conv2 = self.conv_down2(x)
-        x = self.maxpool(conv2) #8
-        
-        conv3 = self.conv_down3(x)
-        x = self.maxpool(conv3) #4
-
-        x = self.mid_conv(x)
-        
-        x = self.upsample1(x) #8        
-        x = torch.cat([x, conv3], dim=1)
-        x = self.dconv_up3(x)
-        x = self.doncv_up3_2(x)
-
-        x = self.upsample2(x) #16  
-        x = torch.cat([x, conv2], dim=1)       
-        x = self.dconv_up2(x)
-        x = self.doncv_up2_2(x)
-
-        x = self.upsample3(x) #32
-        x = torch.cat([x, conv1], dim=1)
-        x = self.dconv_up1(x)
-        x = self.dconv_up1_2(x)
-        
-        out = self.conv_last(x)
-        
-        return out
+        return x4 #x4_conv
