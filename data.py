@@ -217,10 +217,10 @@ class MvtecDatasetSR(Dataset):
                         break
             else:
                 if self.mode == None:
-                    if 'good' not in file:
+                    if 'good' not in file.split('/')[-2]:
                         self.lst.append(file)
                 else:
-                    if self.mode in file:
+                    if file.split('\\')[-2] in self.mode:
                         self.lst.append(file)
                     if len(self.lst) == self.max_num:
                         break
@@ -275,7 +275,7 @@ class MvtecDatasetSR(Dataset):
 
         return noisy_image
        
-    def transform(self, img, size=(112, 112)):
+    def transform(self, img, size=(64, 64)):
         T = transforms.Compose([
             transforms.Resize(size),
             transforms.ToTensor()
@@ -742,7 +742,7 @@ class MNIST(Dataset):
         files, 
         labels,
         train=True,
-        num=8,
+        num=[0,1,2,3,4,5,6,7,8,9],
         max_file=None
     ):
         self.config = config
@@ -758,9 +758,11 @@ class MNIST(Dataset):
             self.cnt = max_file
         else:
             self.cnt = None
-
+        
+        if len(self.num) == 1:
+            self.num = [self.num]
         for i in range(len(self.data)):
-            if self.labels[i] == self.num:
+            if self.labels[i] in self.num:
                 self.lst.append([self.data[i], self.labels[i]])
             if self.cnt:
                 if self.cnt == len(self.lst):
@@ -804,7 +806,7 @@ class MNIST(Dataset):
     def __getitem__(self, idx):
         img, label = self.lst[idx][0], self.lst[idx][1]
         img = self.np2tensor(img)
-        label = self.np2tensor(label)
+        label = self.np2tensor(label).squeeze(0).type(torch.LongTensor)
         img = self.transform(img)
         #downsample img
         if len(img.shape) == 2:

@@ -43,7 +43,7 @@ if __name__ == "__main__":
     np.random.seed(42)
     np.random.shuffle(mri_files)
     #split mri_files into train, validation and test in 70:15:15 ratio
-    train_split = int(0.85 * len(mri_files))
+    train_split = int(0.7 * len(mri_files))
     mri_files_train = mri_files[:train_split]
     mri_files_test = mri_files[train_split:]
     

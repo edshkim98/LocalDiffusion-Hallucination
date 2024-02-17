@@ -645,16 +645,17 @@ class GaussianDiffusion(nn.Module):
             #if branch_out, cond_img is originally a full condition, mask is probability-based mask
             #mask1 = torch.clip(mask, 0.2, 1.0).to(device)
             cond_out = cond_img * mask.to(device)
+            self.cond_out = cond_out.to(torch.float32)
             #cond_out = F.interpolate(cond_out, scale_factor=5, mode='bilinear',align_corners=False)
             #mask_out =  F.interpolate(mask, scale_factor=5, mode='nearest')
             # mask = torch.where(mask < 0.9, 0.0, mask) #0.7
-            mask2 = (1. - mask)
+            binary_mask = (mask.cpu() >= 1.0).float()
+            mask2 = (1. - binary_mask)
             mask2 = torch.clip(mask2, 0.9, 1.0).to(device)
 
             cond_in = cond_img * mask2
             cond_in = cond_in.to(torch.float32)
             cond_out = cond_out.to(torch.float32)
-            self.cond_out = cond_out
 
             np.save('lr_out.npy', cond_out.cpu().detach().numpy())
             np.save('lr_in.npy', cond_in.cpu().detach().numpy())
@@ -673,9 +674,12 @@ class GaussianDiffusion(nn.Module):
 
                 model_output_out = torch.where(mask.cpu() == 0., torch.tensor(min_max_val[0]), model_output_out)
                 model_output_out = model_output_out.to(device) 
-                model_output_out = 0.5*model_output_out + 0.5*self.cond_out 
+                #model_output_out = 0.5*model_output_out + 0.5*self.cond_out 
                 
                 mask = 1. - mask
+                #if self.t < 1:
+                if self.config['data'] == 'mnist':
+                    model_output_in = model_output_in.cpu()*mask2.cpu()
                 model_output_in = model_output_in.to(device)
 
                 if self.t == 0:
@@ -738,40 +742,31 @@ class GaussianDiffusion(nn.Module):
             x_start_out = preds_out.pred_x_start
             x_start_in = preds_in.pred_x_start
             if clip_denoised:
-                
-                self.s = 0#torch.quantile(x_start_out.reshape(1,-1).abs(), 1.0, dim = -1)
-                if self.s > min_max_val[1]:
-                    self.s = right_pad_dims_to(x_start_out, self.s)
-                    x_start_out = x_start_out.clamp(None, self.s) / (0.5*self.s)
-                    #x_start_out = x_start_out * self.cond_out.max()
 
-                    x_start_out.clamp_(min_max_val[0], min_max_val[1])
-                # else:
                 x_start_out.clamp_(min_max_val[0],  min_max_val[1])#cond_img.max())      
                 x_start_in.clamp_(min_max_val[0], min_max_val[1])
 
-            if (self.t == self.config['start_timestep']-1) and (self.config['start_intermediate']):
+            if (self.t <= self.config['start_timestep']) and (self.config['start_intermediate']):
                 self.config['branch_out'] = False
                 self.config['mask_x'] = False
                 x_start = x_start_out + x_start_in
 
                 #binarize the mask
-                mask = (mask > 0.).to(torch.float32)
+                mask = (mask >= 1.).to(torch.float32)
 
                 x_out = x[0] * mask.to(device)
                 x_in = x[1] * (1. - mask.to(device))
                 assert torch.any((x_out == 0.)) and torch.any((x_in == 0.)), 'x_out and x_in should be masked'
+                self.x_branchout = [x_out, x_in]
                 x = torch.where(x_out == 0., x_in, x_out)
                 self.x = x
                 self.x_start_skip = x_start.clone()
+                #self.x_start_skip_mask = torch.where(self.x_start_skip == 0., 0., 1)
 
                 if clip_denoised:
-                    x_start.clamp_(min_max_val[0], min_max_val[1])#(-1., 1.)
-
+                    x_start.clamp_(min_max_val[0], min_max_val[1])
                 if self.viz:
                     np.save('pred_concat_'+str(self.cnt)+'.npy', x_start.cpu().detach().numpy())
-                    #np.save('cond_'+str(self.cnt)+'.npy', cond_img.cpu().detach().numpy())
-
                 model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)
                 return model_mean, posterior_variance, posterior_log_variance, x_start
             
@@ -786,22 +781,13 @@ class GaussianDiffusion(nn.Module):
             if clip_denoised:
                 x_start.clamp_(min_max_val[0], min_max_val[1])#(-1., 1.)
 
-            if (self.t < self.config['start_timestep']-1) and (self.config['start_intermediate']) and (self.branch_out):
+            if (self.t < self.config['continue_fusion_timestep']) and (self.config['start_intermediate']) and (self.branch_out):
 
-                # if self.t != 0:
-                #     self.s = torch.quantile(x_start.reshape(1,-1).abs(), 0.9999, dim = -1)
-                #     self.s.clamp_(min = min_max_val[1])
-                #     self.s = right_pad_dims_to(x_start, self.s)
-                #     x_start = x_start.clamp(None, self.s) / (0.5*self.s)
-                #     x_start = x_start.clamp_(min_max_val[0], min_max_val[1])
-                # else:
-                #     x_start = x_start.clamp_(min_max_val[0], min_max_val[1])
-
-                coeff =  (1/30) * self.t #+ 0.1
+                coeff =  0 #(1/((self.config['continue_fusion_timestep'])*2)) * self.t #+ 0.5
                 x_start = coeff * self.x_start_skip + (1. - coeff) * x_start
                 x_start = x_start.clamp_(min_max_val[0], min_max_val[1])
 
-                
+            
             model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
@@ -820,18 +806,62 @@ class GaussianDiffusion(nn.Module):
             noise = torch.randn_like(x[0]) if t > 0 else 0. # no noise if t == 0
             pred_img_out = model_mean[0] + (0.5 * model_log_variance[0]).exp() * noise
             pred_img_in = model_mean[1] + (0.5 * model_log_variance[1]).exp() * noise
-            confidence = torch.tensor(0.)
-            stats = (torch.rand_like(model_mean[0].cpu()).squeeze(1), torch.rand_like(model_log_variance[0].cpu()).squeeze(1))
-            return [pred_img_out, pred_img_in], x_start, confidence, stats
+            return [pred_img_out, pred_img_in], x_start
         else:
             noise = torch.randn_like(self.x) if t > 0 else 0. # no noise if t == 0
             pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
-            #if self.t == self.config['start_timestep']-1:
-                #if self.viz:
-                 #   np.save('noisy_x_'+str(self.cnt)+'.npy', pred_img.cpu().detach().numpy())
-            confidence = self.gaussian_pdf(pred_img, model_mean, model_log_variance)
-            stats = (model_mean.cpu().squeeze(1), (0.5*model_log_variance.cpu().squeeze(1)).exp())
-        return pred_img, x_start, confidence, stats
+            #if (self.t == 0) and (self.branch_out == True) and (self.start_intermediate==True):
+                #pred_img = pred_img * self.x_start_skip_mask
+            return pred_img, x_start
+
+    def branching_out(self, img, x_start, imgs, x_start_lst):
+
+        # print("Branching out at timestep: ", self.t)
+        imgs.append([img[0].cpu(), img[1].cpu()])
+        if self.t == 0:
+            np.save('pred_out2.npy', img[0].cpu().detach().numpy())
+            np.save('pred_in2.npy', img[1].cpu().detach().numpy())
+        x_start_lst.append([x_start[0].cpu(), x_start[1].cpu()])
+        self.branch_cnt = 1
+
+        return img, x_start, imgs, x_start_lst
+    
+    def fusion(self, img, x_start, imgs, x_start_lst, mask, min_max_val, cond_img, self_cond = None):
+        # print("Fusion at timestep: ", self.t)
+
+        if (self.branch_cnt == 1) or (self.branch_out == False):
+            imgs.append(img)
+            x_start_lst.append(x_start.cpu())
+
+            self.branch_cnt = 0
+        else:
+            #Predictor to classify if x_start is fake or not 
+            #prob = self.predictor(x_start)
+            #if prob > 0.5:
+            #    print("Classified as correct (Hallucinated)")
+            #else:
+            #    print("Classified as incorrect (Real)")
+            #    self.config['branch_out'] = True
+            if (self.t < 20) and (self.t > self.config['continue_fusion_timestep']) and (self.config['start_intermediate']) and (self.config['use_gt'] == False):
+                self.config['branch_out'] = True #if incorrect, repeat branching out process at the same timestep
+                self.config['mask_x'] = True
+                img, x_start = self.p_sample(self.x_branchout, mask, min_max_val, cond_img, self.t, self_cond)
+                #np.save('pred_concat2_'+str(self.cnt)+'.npy', img.cpu().detach().numpy())
+                imgs.append(img)
+                x_start_lst.append(x_start.cpu())
+
+                self.branch_cnt = 1
+            else:
+                print("Continue Fusion at timestep: ", self.t)
+                self.config['branch_out'] = False
+                imgs.append(img)
+                # if self.t == 1:
+                #     np.save('pred_concat_'+str(self.cnt)+'.npy', x_start.cpu().detach().numpy())
+                x_start_lst.append(x_start.cpu())
+
+                self.branch_cnt = 0
+
+        return img, x_start, imgs, x_start_lst
 
     @torch.inference_mode()
     def p_sample_loop(self, cond_img, mask, min_max_val, shape, return_all_timesteps = False, return_all_outputs = False):
@@ -846,38 +876,26 @@ class GaussianDiffusion(nn.Module):
                 #t starts in reverse order: e.g. 9 . 8 .... 0
                 t = torch.tensor(self.config['use_gt_timestep'], device=device).long() #torch.randint(0, self.num_timesteps, (batch,), device=device).long()
                 t = torch.stack([t for _ in range(batch)], dim=0)
-                img = self.q_sample(x_start = cond_img, t = t, noise = img)
+                img = self.q_sample(x_start = self.hr, t = t, noise = img)
                 self.num_timesteps = self.config['use_gt_timestep']
 
         imgs = [img]
         confidence_map = []
-        stats_mean_lst = []
-        stats_std_lst = []
         x_start_lst = []
         x_start = None
-
+        self.branch_cnt = 0
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps, disable=True):
             self.t = t
+
             self_cond = x_start if self.self_condition else None
             if self.config['branch_out']:
                 if self.t == self.num_timesteps-1:
                     img = [img, img]                
-            img, x_start, confidence, stats = self.p_sample(img, mask, min_max_val, cond_img, t, self_cond)
+            img, x_start = self.p_sample(img, mask, min_max_val, cond_img, self.t, self_cond)
             if self.config['branch_out']:
-                imgs.append([img[0].cpu(), img[1].cpu()])
-                if self.t == 0:
-                    np.save('pred_out2.npy', img[0].cpu().detach().numpy())
-                    np.save('pred_in2.npy', img[1].cpu().detach().numpy())
-                x_start_lst.append([x_start[0].cpu(), x_start[1].cpu()])
+                img, x_start, imgs, x_start_lst = self.branching_out(img, x_start, imgs, x_start_lst)
             else:
-                imgs.append(img)
-                x_start_lst.append(x_start.cpu())
-            confidence_map.append(confidence.cpu())
-            stats_mean_lst.append(stats[0].numpy())
-            stats_std_lst.append(stats[1].numpy())
-
-        stats_mean = np.mean(np.array(stats_mean_lst), axis=0)
-        stats_std = np.mean(np.array(stats_std_lst), axis=0)
+                img, x_start, imgs, x_start_lst = self.fusion(img, x_start, imgs, x_start_lst, mask, min_max_val, cond_img, self_cond = None)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
         if not self.start_intermediate:
@@ -889,9 +907,9 @@ class GaussianDiffusion(nn.Module):
 
         ret = self.unnormalize(ret)
         if return_all_outputs:
-            return ret, x_start_lst, confidence_map, stats_mean, stats_std
-        print("Ret shape: ", ret.shape)
-        print("Ret min {} max {}".format(torch.min(ret), torch.max(ret)))
+            return ret, x_start_lst, confidence_map
+        print("Return shape: ", ret.shape)
+        print("Return min {} max {}".format(torch.min(ret), torch.max(ret)))
         return ret
 
     @torch.inference_mode()
@@ -964,9 +982,6 @@ class GaussianDiffusion(nn.Module):
         if (self.config['ood_AD'] == True) or (self.config['ood_confidence'] == True):
             self.config['mask_cond'] = True
             self.config['mask_x'] = True
-        #else:
-        #    self.config['mask_cond'] = False
-        #    self.config['mask_x'] = False
 
         if self.config['branch_out']:
             if len(torch.unique(mask)) == 1:

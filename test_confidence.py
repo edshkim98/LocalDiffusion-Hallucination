@@ -94,15 +94,15 @@ if __name__ == "__main__":
     print(config['ProjectName'])
     # dataset and dataloader
     # dataset and dataloader
-    file_path = './MNIST/raw/t10k-images-idx3-ubyte'
-    label_path = './MNIST/raw/t10k-labels-idx1-ubyte'
+    file_path = '/home/seunghki/mnist_az/MNIST/raw/t10k-images-idx3-ubyte'
+    label_path = '/home/seunghki/mnist_az/MNIST/raw/t10k-labels-idx1-ubyte'
     
     np.random.seed(42)
     mri_files = idx2numpy.convert_from_file(file_path)
     mri_labels = idx2numpy.convert_from_file(label_path)
     if config['ood']:
         if config['data'] == 'mnist':
-            ds_test = MNIST(config, mri_files, mri_labels, train=False, num=3, max_file=100) 
+            ds_test = MNIST(config, mri_files, mri_labels, train=False, num=[3], max_file=300) 
         elif config['data'] == 'mri':
             print("Data: Brain")
             np.random.seed(42)
@@ -121,12 +121,14 @@ if __name__ == "__main__":
             mri_files = config['mvtec_path']
             mri_files = np.array(glob.glob(mri_files))
             np.random.shuffle(mri_files)
+            print(config['anomaly_name'], len(mri_files))
+            
             if 'mvtecSR' == config['data']:
-                ds_test = MvtecDatasetSR(mri_files, train=False, mode=config['mvtec_path'].split('/')[-2])
+                ds_test = MvtecDatasetSR(mri_files, train=False, mode=config['anomaly_name'])
             elif config['data'] == 'mvtecGray':
                 ds_test = MvtecDatasetGray(mri_files, train=False, mode=config['mvtec_path'].split('/')[-2], denoise=config['denoise'])
             else:
-                ds_test = MvtecDatasetSR(mri_files, train=False, mode=config['mvtec_path'].split('/')[-2], denoise=config['denoise'])
+                ds_test = MvtecDatasetSR(mri_files, train=False, mode=config['anomaly_name'], denoise=config['denoise'])
     else:
         if config['data'] == 'mnist':
             ds_test = MNIST(config, mri_files, mri_labels, train=False, max_file=100) 
@@ -153,13 +155,13 @@ if __name__ == "__main__":
 
     if config['data'] == 'mri': 
         if not config['translate_zero']:
-            max_val = (4096-config['mean_t1'])/config['std_t1']
-            min_val = (0-config['mean_t1'])/config['std_t1']
-            min_val_t1 = (0-config['mean_flair'])/config['std_flair']
+            max_val = (4096-config['mean_flair'])/config['std_flair']
+            min_val = (0-config['mean_flair'])/config['std_flair']
+            min_val_t1 = (0-config['mean_t1'])/config['std_t1']
         else:
-            min_val2 = (0-config['mean_t1'])/config['std_t1'] 
+            min_val2 = (0-config['mean_flair'])/config['std_flair'] 
             min_val = 0.
-            max_val = (4096-config['mean_t1'])/config['std_t1']
+            max_val = (4096-config['mean_flair'])/config['std_flair']
             max_val = max_val + torch.abs(torch.tensor(min_val2))
             min_val_t1 = 0.
         min_max_val = (min_val, max_val, min_val_t1) 
@@ -200,7 +202,7 @@ if __name__ == "__main__":
 
     if config['ood_AD']:
         MODEL = "patchcore"  # 'padim', 'cflow', 'stfpm', 'ganomaly', 'dfkde', 'patchcore'
-        CONFIG_PATH = './anomalib/' + f"src/anomalib/models/{MODEL}/config.yaml"
+        CONFIG_PATH = '/home/seunghki/mnist_az/anomalib/' + f"src/anomalib/models/{MODEL}/config.yaml"
         # pass the config file to model, callbacks and datamodule
         config_ad = get_configurable_parameters(config_path=CONFIG_PATH)
 
@@ -212,14 +214,16 @@ if __name__ == "__main__":
                 layers = ['layer2', 'layer3']
         else:
             layers = [2, 3]
-
+        if config['data'] == 'mnist':
+            img_size = 84
         patchcore = PatchcoreModel(input_size = [224, 224], layers = layers,backbone= backbone, pre_trained= True, num_neighbors= 9)
         if config['data'] == 'mnist':
-            pretrained = np.load('./memory_bank_mnist.npy')
-        elif 'mvtec' in config['data']: 
-            pretrained = np.load('./memory_bank_mvtec_{}.npy'.format(config['mvtec_path'].split('/')[2]))
+            pretrained = np.load('/home/seunghki/mnist_az/memory_bank_mnist.npy')
+        elif 'mvtec' in config['data']:
+            print(config['mvtec_path'].split('/')) 
+            pretrained = np.load('/home/seunghki/mnist_az//memory_bank_mvtec_{}.npy'.format(config['mvtec_path'].split('/')[5]))
         else:
-            pretrained = np.load('./memory_bank_mri.npy')
+            pretrained = np.load('/home/seunghki/mnist_az/memory_bank_mri.npy')
         patchcore.memory_bank = torch.from_numpy(pretrained)#.to(device)
         patchcore.training = False
         patchcore.feature_extractor = patchcore.feature_extractor.cpu()
@@ -256,18 +260,22 @@ if __name__ == "__main__":
                 if config['data'] == 'mri':
                     #denormalize first
                     if config['translate_zero']:
-                        mini = (0-config['mean_flair'])/config['std_flair']
+                        mini = (0-config['mean_t1'])/config['std_t1']
                         lr_ad = lr_ad - torch.abs(torch.tensor(mini))
-                    lr_ad = lr_ad[:,0]*config['std_flair'] + config['mean_flair']
+                    lr_ad = lr_ad[:,0]*config['std_t1'] + config['mean_t1']
                     lr_ad = lr_ad/4096.0
                     lr_ad = lr_ad.repeat(1, 3, 1, 1)
-                if ('mvtec' in config['data']): # or (config['data'] == 'mnist'):
+                if ('mvtec' in config['data']) or (config['data'] == 'mnist'):
                     if lr_ad.shape[1] == 1:
                         lr_ad = lr_ad.repeat(1, 3, 1, 1)
                     if lr_ad.max() > 1.0:
                         print("Normalize LR AD")
                         lr_ad = lr_ad / 2
-                    lr_ad = F.interpolate(lr_ad, size=(224, 224), mode='bilinear', align_corners=False)
+                    if 'mvtec' in config['data']:
+                        img_size = 224
+                    else:
+                        img_size = 84
+                    lr_ad = F.interpolate(lr_ad, size=(img_size, img_size), mode='bilinear', align_corners=False)
                 print(lr_ad.shape)
                 lr_ad = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(lr_ad)
 
@@ -278,11 +286,13 @@ if __name__ == "__main__":
                     # anomaly_map = AverageFilter(kernel_size=3)(anomaly_map)
                 print("Anomaly score: ", anomaly_map.max())
                 if config['data'] == 'mnist':
-                    if anomaly_map.max() > 28.0:
-                        if anomaly_map.max() > 30.0:
-                            threshold = anomaly_map.max()-1.3
+                    if anomaly_map.max() > 37.0:
+                        if anomaly_map.max() > 41.0:#44
+                            threshold = anomaly_map.max()-0.72*anomaly_map.std() #41.7
+                        elif anomaly_map.max() > 40.0:
+                            threshold = anomaly_map.max()-0.3*anomaly_map.std() #38.2
                         else:
-                            threshold = anomaly_map.max()-1.0
+                            threshold = 35.0
                         binary_mask = (anomaly_map.cpu() > threshold).float()
                         map_pred = torch.clip(anomaly_map.cpu(), min=threshold-anomaly_map.std(), max=threshold)
                         mask_pred = (map_pred - map_pred.min()) / (threshold - map_pred.min())
@@ -305,27 +315,28 @@ if __name__ == "__main__":
                             binary_mask = torch.ones_like(anomaly_map.cpu())
 
                         cls[cls>0.0] = 1.0
-                        mask_pred = cls.cpu()
-                        binary_mask = cls.cpu()
+                        #mask_pred = cls.cpu()
+                        #binary_mask = cls.cpu()
                 
                 if 'mvtec' in config['data']:
-                    if config['mvtec_path'].split('/')[2] == 'transistor':
+                    if config['mvtec_path'].split('/')[2] == 'transistor': #64
                         print("TRANSISTOR!!")
-                        if anomaly_map.max() > 28:
-                            if anomaly_map.max() > 40.0:
-                                threshold = 33.0 #anomaly_map.max()-5.0
+                        if anomaly_map.max() > 27:
+                            if anomaly_map.max() > 37.0:
+                                threshold = 31.0#32 #anomaly_map.max()-5.0
                             elif anomaly_map.max() > 33.0:
-                                threshold = 31.0 #anomaly_map.max()-4.0
+
+                                threshold = 29.5 #anomaly_map.max()-4.0
                             else:
-                                threshold = 28.5 #anomaly_map.max()-2.5
+                                threshold = 26.8 #anomaly_map.max()-2.5
                             binary_mask = (anomaly_map.cpu() > threshold).float()
-                            map_pred = torch.clip(anomaly_map.cpu(), min=threshold - anomaly_map.std(), max=threshold)
+                            map_pred = torch.clip(anomaly_map.cpu(), min=threshold-anomaly_map.std(), max=threshold)
                             mask_pred = (map_pred - map_pred.min()) / (threshold - map_pred.min())
                             mask_pred = mask_pred**2
                         else:
                             mask_pred = torch.ones_like(anomaly_map.cpu())
                             binary_mask = torch.ones_like(anomaly_map.cpu())
-                    elif config['mvtec_path'].split('/')[2] == 'toothbrush':
+                    elif config['mvtec_path'].split('/')[2] == 'toothbrush': #224
                         if anomaly_map.max() > 35:
                             if anomaly_map.max() > 49:
                                 threshold = 40.0
@@ -341,9 +352,11 @@ if __name__ == "__main__":
                     elif config['mvtec_path'].split('/')[2] == 'hazelnut':
                         if anomaly_map.max() > 55:
                             if anomaly_map.max() > 60:
-                                threshold = 52.0
+                                threshold = 46.5
+                            elif anomaly_map.max() > 50:
+                                threshold = 42.5
                             else:
-                                threshold = 47.0
+                                threshold = 37.5
                             binary_mask = (anomaly_map.cpu() > threshold).float()
                             map_pred = torch.clip(anomaly_map.cpu(), min=threshold-anomaly_map.cpu().std(), max=threshold)
                             mask_pred = (map_pred - map_pred.min()) / (threshold - map_pred.min())
@@ -351,51 +364,40 @@ if __name__ == "__main__":
                         else:
                             mask_pred = torch.ones_like(anomaly_map.cpu())
                             binary_mask = torch.ones_like(anomaly_map.cpu())
-                    elif config['mvtec_path'].split('/')[2] == 'bottle':
-                        if anomaly_map.max() > 40:
-                            if anomaly_map.max() > 49:
-                                threshold = 40.0
-                            else:
-                                threshold = 37.0
-                            binary_mask = (anomaly_map.cpu() > threshold).float()
-                            map_pred = torch.clip(anomaly_map.cpu(), min=0, max=threshold)
-                            mask_pred = (map_pred - map_pred.min()) / (threshold - map_pred.min())
-                            mask_pred = mask_pred #**2
-                        else:
-                            mask_pred = torch.ones_like(anomaly_map.cpu())
-                            binary_mask = torch.ones_like(anomaly_map.cpu())
                     elif config['mvtec_path'].split('/')[2] == 'cable':
-                        if anomaly_map.max() > 45:#40:
-                            if anomaly_map.max() > 65:#46:
-                                threshold = 50.0#40.0
+                        if anomaly_map.max() > 40:#112
+                            if anomaly_map.max() > 50:#46:
+                                threshold = 42.5
                             else:
-                                threshold = 40.0#35.0
+                                threshold = 36.5
                             binary_mask = (anomaly_map.cpu() > threshold).float()
-                            map_pred = torch.clip(anomaly_map.cpu(), min=threshold-5, max=threshold)
+                            map_pred = torch.clip(anomaly_map.cpu(), min=threshold-anomaly_map.std(), max=threshold)
                             mask_pred = (map_pred - map_pred.min()) / (threshold - map_pred.min())
                             mask_pred = mask_pred**2
                         else:
                             mask_pred = torch.ones_like(anomaly_map.cpu())
                             binary_mask = torch.ones_like(anomaly_map.cpu())
                     elif config['mvtec_path'].split('/')[2] == 'grid':
-                        if anomaly_map.max() > 30:#40:
-                            if anomaly_map.max() > 45:#46:
-                                threshold = 36.0#40.0
+                        if anomaly_map.max() > 27:#224
+                            if anomaly_map.max() > 40:
+                                threshold = 35.0
+                            elif anomaly_map.max() > 35.0:
+                                threshold = 30.0
                             else:
-                                threshold = 27.0#35.0
+                                threshold = 26.5#35.0
                             binary_mask = (anomaly_map.cpu() > threshold).float()
-                            map_pred = torch.clip(anomaly_map.cpu(), min=threshold-5, max=threshold)
+                            map_pred = torch.clip(anomaly_map.cpu(), min=anomaly_map.cpu().min(), max=threshold)
                             mask_pred = (map_pred - map_pred.min()) / (threshold - map_pred.min())
                             mask_pred = mask_pred**2
                         else:
                             mask_pred = torch.ones_like(anomaly_map.cpu())
                             binary_mask = torch.ones_like(anomaly_map.cpu())
-                    mask_pred = torch.zeros_like(cls.cpu())
-                    mask_pred[:,:, 70:96, 61:87] = 1.0
-                    mask_pred = transforms.RandomVerticalFlip(p=1.0)(mask_pred)
-                    hr = transforms.RandomVerticalFlip(p=1.0)(hr)
-                    lr = transforms.RandomVerticalFlip(p=1.0)(lr)
-                    binary_mask = mask_pred
+                    #mask_pred = torch.zeros_like(cls.cpu())
+                    #mask_pred[:,:, 40:55, 38:50] = 1.0
+                    #mask_pred = transforms.RandomVerticalFlip(p=1.0)(mask_pred)
+                    #hr = transforms.RandomVerticalFlip(p=1.0)(hr)
+                    #lr = transforms.RandomVerticalFlip(p=1.0)(lr)
+                    #binary_mask = mask_pred
                     #mask_pred = cls.cpu()
                     #binary_mask = cls.cpu()
                     #mask_pred = torch.clip(mask_pred, 0., 0.6)
