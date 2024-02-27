@@ -217,13 +217,14 @@ class MvtecDatasetSR(Dataset):
                         break
             else:
                 if self.mode == None:
-                    if 'good' not in file.split('/')[-2]:
-                        self.lst.append(file)
+                    #if 'good' not in file.split('/')[-2]:
+                    self.lst.append(file)
                 else:
-                    if file.split('\\')[-2] in self.mode:
+                    if file.split('/')[-2] in self.mode:
                         self.lst.append(file)
-                    if len(self.lst) == self.max_num:
-                        break
+                    if self.max_num != False:      
+                        if len(self.lst) == self.max_num:
+                            break
     def __len__(self):
         return len(self.lst)
     
@@ -275,7 +276,7 @@ class MvtecDatasetSR(Dataset):
 
         return noisy_image
        
-    def transform(self, img, size=(64, 64)):
+    def transform(self, img, size=(112, 112)):
         T = transforms.Compose([
             transforms.Resize(size),
             transforms.ToTensor()
@@ -286,6 +287,7 @@ class MvtecDatasetSR(Dataset):
     def __getitem__(self, idx):
         img_rgb = Image.open(self.lst[idx]).convert('RGB')
         img_rgb = self.transform(img_rgb)
+        abnormal = self.lst[idx].split('/')[-2]
 
         if self.denoise:
             img_rgb_down = self.salt_and_pepper_noise(img_rgb)
@@ -309,15 +311,18 @@ class MvtecDatasetSR(Dataset):
             return img_rgb, img_rgb_down, mask
         
         if not self.train:
-            label = self.lst[idx].replace('test', 'ground_truth')
-            name = label.split('/')[-1][:-4] + '_mask.png'
-            label = label.replace(label.split('/')[-1], name)
-            label = self.transform(Image.open(label))
-            label[label > 0] = 1
+            if self.mode is None:
+                label = 0 if 'good' in self.lst[idx] else 1 #torch.zeros_like(img_rgb)
+            else:
+                label = self.lst[idx].replace('test', 'ground_truth')
+                name = label.split('/')[-1][:-4] + '_mask.png'
+                label = label.replace(label.split('/')[-1], name)
+                label = self.transform(Image.open(label))
+                label[label > 0] = 1
         else:
             label = 0 if 'good' in self.lst[idx] else 1
 
-        return img_rgb, img_rgb_down, label
+        return img_rgb, img_rgb_down, label, abnormal
 
 
 #IMAGE TRANSLATION for BRATS
@@ -327,12 +332,14 @@ class MedDataset_png(Dataset):
         config,
         mri_files,
         train=True,
-        tumor=False
+        tumor=False,
+        mode='flair'
     ):
         self.config = config
         self.mris = mri_files
         self.train = train
         self.tumor = tumor
+        self.mode = mode
         self.lst = []
         for mri in self.mris:
             t1 = mri.replace('flair','t1')
@@ -430,7 +437,8 @@ class MedDataset_png(Dataset):
 
         #seg = self.np2tensor(seg)
         #seg = self.transform(seg)
-  
+        if self.mode == 'flair':
+            return flair_sample, t1_sample, seg
         return t1_sample, flair_sample, seg 
       
 class MedDataset(Dataset):
@@ -759,7 +767,7 @@ class MNIST(Dataset):
         else:
             self.cnt = None
         
-        if len(self.num) == 1:
+        if type(self.num) != list:
             self.num = [self.num]
         for i in range(len(self.data)):
             if self.labels[i] in self.num:

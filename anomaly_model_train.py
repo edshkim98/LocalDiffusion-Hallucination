@@ -288,23 +288,38 @@ if __name__ == "__main__":
         print(len(mri_files), len(mri_files_test))
 
     if mode == 'mnist':
-        train_dataset = MNIST(config_data, images, labels, num=8, train=False)#, max_file=1000)
-        train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+        train_dataset = MNIST(config_data, images, labels, num=1, train=False, max_file=300)
+        train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 
     elif mode == 'mvtec':
-        obj = 'transistor'
+        print("MVTEC data")
+        obj = 'pill'
         train_files = './mvtec/{obj}/*/good/*.png'.format(obj=obj)
-        test_files = './mvtec/{obj}/test/cut_lead/*.png'.format(obj=obj)
+        exceptions = [] #['bottle', 'bottle2', 'leather', 'zipper']
+        #test_files = './mvtec/{obj}/test/{defect}/*.png'.format(obj=obj, defect=defect)
 
         train_files = glob.glob(train_files)
-        test_files = glob.glob(test_files)
+        if len(exceptions) > 0:
+            train_files_filtered = []
+            for i in range(len(train_files)):
+                if train_files[i].split('/')[-4] in exceptions:
+                    continue
+                train_files_filtered.append(train_files[i])
+        #test_files = glob.glob(test_files)
+        
+        else:
+            train_files_filtered= train_files
 
-        print(len(train_files), len(test_files))
+        np.random.seed(42)
+        np.random.shuffle(train_files)
+        np.random.shuffle(train_files_filtered)
 
-        train_dataset = MvtecDatasetSR(train_files, train=True, denoise=True)
+        print(len(train_files), len(train_files_filtered))
+
+        train_dataset = MvtecDatasetSR(train_files_filtered, train=True, denoise=False, max_num=1000)
         train_loader = DataLoader(train_dataset, batch_size=16, shuffle=False)
-        test_dataset = MvtecDatasetSR(test_files, train=False, mode='cut_lead', denoise=True)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+        #test_dataset = MvtecDatasetSR(test_files, train=False, mode=str(defect), denoise=False)
+        #test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
     else:
         train_dataset = MedDataset_png(config_mri, mri_files, train=True, tumor=False)
         test_dataset = MedDataset_png(config_mri, mri_files_test, train=False, tumor=True)
@@ -317,7 +332,7 @@ if __name__ == "__main__":
     print(data[1].min(), data[1].max())
     print(data[0].min(), data[0].max())
 
-    backbone = "efficientnet_b4" #"wide_resnet50_2"
+    backbone = "wide_resnet50_2" #"wide_resnet50_2"
     if 'resnet' in backbone:
         layers = ['layer2', 'layer3']
     else:
@@ -336,10 +351,10 @@ if __name__ == "__main__":
 
     for _ in range(repeat):
         for i, data in enumerate(train_loader):
-            if len(data) == 2:
-                _, input = data
+            if len(data) == 3:
+                input, _, _ = data
             else:
-                _, input, _ = data
+                input, _, *_ = data
             if input.shape[1] != 3:
                 input = input.repeat(1, 3, 1, 1)
             if mode != 'mri':
@@ -360,10 +375,11 @@ if __name__ == "__main__":
     print("Applying core-set subsampling to get the embedding.")
     patchcore.subsample_embedding(embeddings, 0.1)
     print("Done.")
-
+    if obj == '*':
+        obj = 'all'
     if mode == 'mnist':
         np.save('memory_bank_mnist_train.npy', patchcore.memory_bank.cpu().numpy()) 
     elif mode == 'mvtec':
-        np.save('memory_bank_mvtec_transistor_train.npy', patchcore.memory_bank.cpu().numpy())
+        np.save('memory_bank_mvtec_{}.npy'.format(obj), patchcore.memory_bank.cpu().numpy())
     elif mode == 'mri':
         np.save('memory_bank_mri_flair_train.npy', patchcore.memory_bank.cpu().numpy())

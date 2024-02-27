@@ -1,0 +1,58 @@
+Hyper-parameter for ECCV
+Best setting for MVTec:
+1. High clip for IND
+2. When concat, mask IND then SUM(pred_ind, pred_ood)
+3. Same for noisy x_in and x_out
+4. interpolate between pred_ood and lr_ood
+5. interpolate again during fusion for ood
+
+MNIST:
+1. Mask IND: True
+2. Clip COND_ind: 0.5, 1.0
+
+Flair:
+1. Fusion step: 8
+
+T1
+1. Fusion step: 1
+                        if anomaly_map.max() > 47:#43:
+                            if anomaly_map.max() > 50:#50:
+                                threshold = anomaly_map.max()-3#anomaly_map.max()-7
+                            else:
+                                threshold = 45.5#43
+
+Trans 64: VV
+1. Clip COND_ind: 0.9, 1.0
+2. fusion step: 1
+3. Interpolation with lr: no
+4. cls threshold: 33
+
+Grid 224  VV
+1. Clip Cond_ind: 0.95
+2. fusion step: 1 with no skip connect
+3. Interpolation with lr: yes
+
+3, 9, 12, 15, 17, 29
+
+Tooth 224 12 VV
+1. Clip Cond_ind: 0.95
+2. fusion step: 3
+3. Interpolation with lr: yes
+4. cls threshold: 40 #43.469692
+
+Cable 112 12 VV
+1. Clip Cond_ind: 0.95
+2. fusion step: 5
+3. Interpolation with lr: yes
+4. cls threshold: 43.469692
+
+Hazelnut 224 16
+
+Zipper 224 16
+
+1. Make good use of every space (should be no space in diagram)
+
+1. Change the order of viz (Cond, Hallu, Pred, GT)
+2. Add Transistor and Grid and Flair to Fig2 including predictions (cherrypick is fine)
+3. Two bars stacked in Fig7
+4. Change the color for fig7b (too wide) (avg, flair, t1)
