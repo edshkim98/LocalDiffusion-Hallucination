@@ -1,14 +1,7 @@
-# HallucinationDiffusion
+# Tackling Structural Hallucination in Image Translation with Local Diffusion
 
-**Background:** Hallucination can happen when there is distribution shift during image generation. Typically, the distribution shift varies at local regions, i.e. some regions are in-distribution while other are out-of-distribution <br />
-**Research question:** It is unknown whether and how the in-/out-of-distribution regions are affecting each other in terms of hallucination for generative models (e.g. diffusion models) <br />
-**Hypothesis:** More hallucination and error prone when the input conditioned image contains OOD region <br />
-**Initial Exp:** Localize image generation by partioning a condition image/noisy image based on OOD and IND regions <br />
-**Code modifications:** Masking operation is inside ddpm.py and test.py. Specific masking operation can be chosen by changing config.yaml file.
-1. No masking
-2. Condition_OUT
-3. Condition_IN
-4. Condition_OUT_X_OUT
-5. Condition_IN_X_IN
-6. Condition_OUT_X_IN
-7. Condition_IN_X_OUT
+**Background** <br />
+Recent developments in diffusion models have advanced conditioned image generation, yet they struggle with reconstructing out-of-distribution (OOD) images, such as unseen tumors in medical images,
+causing “image hallucination” and risking misdiagnosis. We hypothesize that **hallucinations are caused by local OOD regions in the conditional images**, and by partitioning the OOD area from in-distribution (IND) region and conducting separate generations, hallucinations can be alleviated. <br />
+**Method** <br />
+We propose a novel diffusion process aimed at reducing the hallucination in pre-trained diffusion models without any additional training with new data. To the best of our knowledge, this is the **first work to identify and tackle the hallucination problem in diffusion models for image translation**.
