@@ -11,6 +11,7 @@ from torch import nn, einsum
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import ConcatDataset
 
 from torch.optim import Adam
 
@@ -448,7 +449,25 @@ class Unet(nn.Module):
 
 
 # classifier
+# Define a simple CNN model
+class SimpleCNN(nn.Module):
+    def __init__(self):
+        super(SimpleCNN, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
+        self.fc1 = nn.Linear(in_features=64 * 7 * 7, out_features=128)
+        self.fc2 = nn.Linear(in_features=128, out_features=10)
+        self.relu = nn.ReLU()
 
+    def forward(self, x):
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+        x = x.view(-1, 64 * 7 * 7) # Flatten the tensor for the fully connected layer
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+    
 class PatchcoreModel(DynamicBufferModule, nn.Module):
     """Patchcore Module."""
 
@@ -475,7 +494,7 @@ class PatchcoreModel(DynamicBufferModule, nn.Module):
             out_indices = layers
             self.feature_extractor = timm.models.efficientnet_b4(pretrained=True, features_only=True, out_indices=tuple(out_indices))
             self.layers = out_indices
-        self.feature_extractor = self.feature_extractor.to(device)
+        self.feature_extractor = self.feature_extractor#.to(device)
         self.feature_pooler = torch.nn.AvgPool2d(3, 1, 1)
         self.anomaly_map_generator = AnomalyMapGenerator(input_size=input_size)
 
@@ -688,12 +707,16 @@ class Classifier_PatchCore(nn.Module):
         if 'mnist' in self.mode:
             patchcore.load_state_dict(torch.load(f'patchcore_mnist_{self.obj}_hr.pth'))
         elif 'mvtec' in self.mode:
-            pretrained = np.load(f'memory_bank_mvtec_all.npy')
+            if self.obj == 'pill':
+                pretrained = np.load(f'/home/seunghki/mnist_az/memory_bank_mvtec_pill_hr.npy')
+            else:
+                pretrained = np.load(f'/home/seunghki/mnist_az/memory_bank_mvtec_all.npy')
         else:
-            pretrained = np.load(f'memory_bank_brats_{obj}_hr.npy')
-        patchcore.memory_bank = torch.from_numpy(pretrained).to(device)  
+            pretrained = np.load(f'/home/seunghki/mnist_az/memory_bank_mri_flair2t1.npy')
+        patchcore.memory_bank = torch.from_numpy(pretrained)#.to(device)  
 
         self.patchcore = patchcore
+        self.patchcore.memory_bank = self.patchcore.memory_bank.to(device)
 
         if self.threshold == None:
             self.create_testloader()
@@ -702,7 +725,7 @@ class Classifier_PatchCore(nn.Module):
     def create_testloader(self):
         
         if 'mvtec' in self.mode:
-            test_files = f'./mvtec/{self.obj}/test/*/*.png'
+            test_files = f'/home/seunghki/mnist_az/mvtec/{self.obj}/test/*/*.png'
             test_files = glob.glob(test_files)
             self.test_dataset = MvtecDatasetSR(test_files, train=False, mode=None, denoise=False)
             self.test_loader = DataLoader(self.test_dataset, batch_size=1, shuffle=False)
@@ -719,17 +742,26 @@ class Classifier_PatchCore(nn.Module):
             print("Data: Brain")
             np.random.seed(42)
             mri_files = np.array(glob.glob(self.config['mri_files']))
+            mri_files2 = np.array(glob.glob(self.config['mri_files'].replace('tumor', 'normal')))
             np.random.shuffle(mri_files)
+            np.random.shuffle(mri_files2)
 
             #split mri_files into train, validation and test in 70:15:15 ratio
             train_split = int(0.8 * len(mri_files))
             mri_files_test = mri_files[:train_split]
 
-            self.test_dataset = MedDataset_png(self.config, mri_files_test, train=False, tumor=False)
+            self.test_dataset = MedDataset_png(self.config, mri_files2, train=False, tumor=False)
+            self.test_dataset2 = MedDataset_png(self.config, mri_files_test, train=False, tumor=True)
+            print(len(self.test_dataset), len(self.test_dataset2))
+            #concatenate the two datasets
+            self.test_dataset = ConcatDataset([self.test_dataset, self.test_dataset2])
             self.test_loader = DataLoader(self.test_dataset, batch_size=1, shuffle=False)
 
         print("Finished creating testloader.")
-        print(len(test_files))
+        if 'mvtec' in self.mode:
+            print(len(test_files))
+        else:
+            print(len(mri_files_test) + len(mri_files2))
         print("Length of testloader: ", len(self.test_loader))
 
     def calc_threshold(self):
@@ -745,10 +777,8 @@ class Classifier_PatchCore(nn.Module):
         for i, data in enumerate(self.test_loader):
 
             if len(data) == 3:
-                print("Data is 3")
                 input, _, cls = data
             else:
-                print("Data is 4")
                 input, _, cls, _ = data
 
             if input.shape[1] != 3:
@@ -768,6 +798,11 @@ class Classifier_PatchCore(nn.Module):
                 #denormalize the input
                 input = input - mini
                 input = input*std + mean
+                input = input/4096.0
+                if len(torch.unique(cls)) == 1:
+                    cls = torch.tensor([0])
+                else:
+                    cls = torch.tensor([1])
             
             print(input.shape, self.patchcore.input_size)
             input = F.interpolate(input, size=(self.patchcore.input_size[0], self.patchcore.input_size[0]), mode='bilinear', align_corners=False)
@@ -777,9 +812,9 @@ class Classifier_PatchCore(nn.Module):
             anomaly_map, pred_score = out["anomaly_map"], out["pred_score"]
             input = F.interpolate(input, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
 
-            inputs.append(input.cpu())
+            inputs.append(input.cpu().numpy())
             scores.append(pred_score.cpu().numpy())
-            if len(data) > 3:
+            if len(data) >= 3:
                 labels.append(cls.numpy()+1)
         print("Finished testing.")
 
@@ -813,9 +848,9 @@ class Classifier_PatchCore(nn.Module):
             #denormalize the input
             hr = hr - mini
             hr = hr*std + mean
+            hr = hr/4096.0
         hr = F.interpolate(hr, size=(self.patchcore.input_size[0], self.patchcore.input_size[0]), mode='bilinear', align_corners=False)
         hr = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224,0.225])(hr)
-        hr = hr.to(device)
         hr_out = self.patchcore(hr)
         anomaly_map, pred_score = hr_out["anomaly_map"], hr_out["pred_score"]
         anomaly_map = F.interpolate(anomaly_map, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
@@ -925,6 +960,7 @@ class GaussianDiffusion(nn.Module):
 
         timesteps, = betas.shape
         self.num_timesteps = int(timesteps)
+        self.num_timesteps_ori = int(timesteps)
 
         # sampling related parameters
 
@@ -995,6 +1031,16 @@ class GaussianDiffusion(nn.Module):
         if self.config['classifier']:
             print("Classifier is being called")
             self.classifier = Classifier_PatchCore(self.config, obj=self.config['classifier_obj'], threshold=None)
+
+    def call_dsi(self):
+        print("DSI is being called")
+        if self.config['data'] == 'mnist':
+            self.dsi_classifier = SimpleCNN()
+            self.dsi_classifier.load_state_dict(torch.load('./vgg_mnist_cls_best_model.pth'))
+            self.dsi_classifier = self.dsi_classifier.to(self.device)
+        else:
+            self.dsi_classifier = Classifier_PatchCore(self.config, obj=self.config['dsi_class'], threshold=None)
+
 
     @property
     def device(self):
@@ -1257,13 +1303,13 @@ class GaussianDiffusion(nn.Module):
     def fusion(self, img, x_start, imgs, x_start_lst, mask, min_max_val, cond_img, self_cond = None):
         # print("Fusion at timestep: ", self.t)
 
-        if (self.branch_cnt == 1) or (self.branch_out == False):
+        if (self.branch_cnt == 1) or (self.branch_out == False): #First fusion step
             imgs.append(img)
             x_start_lst.append(x_start.cpu())
 
             self.branch_cnt = 0
         else:
-            if self.config['classifier']:
+            if (self.config['classifier']) and (self.config['start_intermediate']):
                 #Predictor to classify if x_start is fake or not 
                 if self.classifier_flag == 0:
                     pred_cls, _, _ = self.classifier(x_start)
@@ -1299,7 +1345,7 @@ class GaussianDiffusion(nn.Module):
                     imgs.append(img)
                     x_start_lst.append(x_start.cpu())
 
-                    self.branch_cnt = 1
+                    self.branch_cnt = 0
                     self.fusion_cnt = 0
             else:
                 if (self.t < self.config['start_timestep']) and (self.t > self.config['continue_fusion_timestep']) and (self.config['start_intermediate']) and (self.config['use_gt'] == False):
@@ -1339,6 +1385,36 @@ class GaussianDiffusion(nn.Module):
                 t = torch.stack([t for _ in range(batch)], dim=0)
                 img = self.q_sample(x_start = self.hr, t = t, noise = img)
                 self.num_timesteps = self.config['use_gt_timestep']
+
+            elif self.config['dsi']:
+                self.num_timesteps = self.num_timesteps_ori
+                for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps, disable=True):
+                    #t starts in reverse order: e.g. 9 . 8 .... 0
+                    self.t = t
+                    t = torch.tensor(t, device=device).long()
+                    t = torch.stack([t for _ in range(batch)], dim=0)
+
+                    self_cond = x_start if self.self_condition else None
+                    time_cond = torch.full((batch,), self.t, device = device, dtype = torch.long)
+
+                    cond_img_ori = cond_img.clone()
+                    img_noisy = self.q_sample(x_start = cond_img_ori, t = t, noise = img)
+                    preds = self.model_predictions(img_noisy, mask, min_max_val, cond_img, t, x_self_cond=None, device=device)
+                    preds = preds.pred_x_start
+                    out = self.dsi_classifier(preds)
+                    if self.config['data'] == 'mnist':
+                        out = nn.Sigmoid()(out)
+                        if (out.argmax(dim=1) == self.config['dsi_class']) and (out[:,self.config['dsi_class']] > 0.7):
+                            self.num_timesteps = self.t
+                            print(out[:,self.config['dsi_class']])
+                            break
+                    else:
+                        pred_cls, _, _ = out
+                        if pred_cls > 0.0:
+                            self.num_timesteps = self.t
+                            break
+                img = self.q_sample(x_start = cond_img, t = t, noise = img)
+                print("DSI Start Timestep: ", self.num_timesteps)
 
         imgs = [img]
         confidence_map = []
@@ -1381,6 +1457,7 @@ class GaussianDiffusion(nn.Module):
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+        self.start_timestep_ddim = times[-self.config['start_timestep']-2]
 
         img = torch.randn(shape, device = device)
         if self.config['branch_out']:
@@ -1408,13 +1485,14 @@ class GaussianDiffusion(nn.Module):
                     continue
                 alpha = self.alphas_cumprod[time]
                 alpha_next = self.alphas_cumprod[time_next]
+                print(f"Alpha: {alpha} Alpha_next: {alpha_next}")
 
                 sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
                 c = (1 - alpha_next - sigma ** 2).sqrt()
 
                 noise = torch.randn_like(img[0])
 
-                if (self.t <= self.config['start_timestep']) and (self.config['start_intermediate']):
+                if (self.t <= self.start_timestep_ddim) and (self.config['start_intermediate']):
                     self.config['branch_out'] = False
                     self.config['mask_x'] = False
                     x_start = torch.where(x_start_out == 0., x_start_in, x_start_out) #x_start_out + x_start_in
@@ -1475,6 +1553,138 @@ class GaussianDiffusion(nn.Module):
 
             imgs.append(img)
 
+        ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
+
+        ret = self.unnormalize(ret)
+        return ret
+    
+    @torch.inference_mode()
+    def ddim_sample2(self, cond_img, mask, min_max_val, shape, return_all_timesteps = False):
+        print("PERFORM DDIM!")
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+
+        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+
+        img = torch.randn(shape, device = device)
+        if self.config['branch_out']:
+            imgs = [img, img]
+        else:
+            imgs = [img]
+
+        x_start = None
+
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
+            self.t = time
+            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
+            self_cond = x_start if self.self_condition else None
+
+
+            if self.config['branch_out']:
+                if self.t == self.num_timesteps-1:
+                    img = [img, img]
+                preds_out, preds_in = self.model_predictions(img, mask, min_max_val, cond_img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+                x_start_out = preds_out.pred_x_start
+                x_start_in = preds_in.pred_x_start
+
+                alpha = self.alphas_cumprod[time]
+                alpha_next = self.alphas_cumprod[time_next]
+                print(f"alpha {alpha} alpha_next {alpha_next}")
+
+                sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+                c = (1 - alpha_next - sigma ** 2).sqrt()
+
+                noise = torch.randn_like(img[0])
+                if (self.t <= self.config['start_timestep']) and (self.config['start_intermediate']):
+                    self.config['branch_out'] = False
+                    self.config['mask_x'] = False
+                    x_start = torch.where(x_start_out == 0., x_start_in, x_start_out) #x_start_out + x_start_in
+                    x_start = x_start.clamp_(min_max_val[0], min_max_val[1])
+                    self.x_start_skip = x_start.clone()
+
+                    #binarize the mask
+                    mask = (mask >= 1.).to(torch.float32)
+
+                    x_out = preds_out.pred_noise * mask.to(device)
+                    x_in = preds_in.pred_noise * (1. - mask.to(device))
+                    assert torch.any((x_out == 0.)) and torch.any((x_in == 0.)), 'x_out and x_in should be masked'
+                    pred_noise = torch.where(x_out == 0., x_in, x_out)
+
+                    if self.viz:
+                        np.save('pred_concat_'+str(self.cnt)+'.npy', x_start.cpu().detach().numpy())
+                    img = x_start * alpha_next.sqrt() + \
+                        c * pred_noise + \
+                        sigma * noise
+                    assert not torch.isnan(x_start).any(), f'x_start should not be nan at time {time}'
+                    assert not torch.isnan(pred_noise).any(), f'noise should not be nan at time {time}'
+                    print("SIGMA: ",((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt())
+                    assert not torch.isnan(img).any(), f'img should not be nan at time {time} alpha {alpha} alpha_next {alpha_next}, c {c}, sigma {sigma}'
+                else:
+                  
+                    img = [x_start_out * alpha_next.sqrt() + c * preds_out.pred_noise + sigma * noise, x_start_in * alpha_next.sqrt() + c * preds_in.pred_noise + sigma * noise]
+
+            else: #Fusion
+                pred_noise, x_start, *_ = self.model_predictions(img, mask, min_max_val, cond_img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+                assert not torch.isnan(x_start).any(), f'x_start should not be nan at time {time}'
+
+                if self.config['classifier']:
+                    #Predictor to classify if x_start is fake or not 
+                    if self.classifier_flag == 0:
+                        pred_cls, _, _ = self.classifier(x_start)
+                        self.pred_cls = pred_cls
+                    if (self.pred_cls > 0.0) or (self.t ==0):
+                        if self.classifier_flag == 0:
+                            print("Classified as correct (Anomaly)")
+                        
+                        print("Continue Fusion at timestep: ", self.t)
+                        self.config['branch_out'] = False
+
+                        self.classifier_flag = 1
+                        self.fusion_cnt +=1
+                        print(f"Pred accepted at time {self.t}")
+                        self.classifier_t[self.cnt] = self.t
+                        np.save('fusion_time.npy', np.array(self.classifier_t))
+
+                        alpha = self.alphas_cumprod[time]
+                        alpha_next = self.alphas_cumprod[time_next]
+
+                        sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+                        c = (1 - alpha_next - sigma ** 2).sqrt()
+
+                        noise = torch.randn_like(img)
+
+                        img = x_start * alpha_next.sqrt() + \
+                            c * pred_noise + \
+                            sigma * noise                        
+                    else:
+                        print("Classified as incorrect (Normal - Hallucinated)")
+                        self.config['branch_out'] = True
+                        self.config['mask_x'] = True
+                    
+                        preds_out, preds_in = self.model_predictions(self.x_branchout, mask, min_max_val, cond_img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+                        x_start_out = preds_out.pred_x_start
+                        x_start_in = preds_in.pred_x_start
+
+                        alpha = self.alphas_cumprod[time]
+                        alpha_next = self.alphas_cumprod[time_next]
+
+                        sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+                        c = (1 - alpha_next - sigma ** 2).sqrt()
+
+                        noise = torch.randn_like(img)
+
+                        img = [x_start_out * alpha_next.sqrt() + c * preds_out.pred_noise + sigma * noise, x_start_in * alpha_next.sqrt() + c * preds_in.pred_noise + sigma * noise]
+
+                        self.fusion_cnt = 0
+
+                if time_next < 0:
+                    img = x_start
+                    imgs.append(img)
+                    continue
+
+            imgs.append(img)
+            
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
         ret = self.unnormalize(ret)

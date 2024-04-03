@@ -251,7 +251,7 @@ class PatchcoreModel(DynamicBufferModule, nn.Module):
 
 if __name__ == "__main__":
 
-    mode = 'mvtec'
+    mode = 'mnist'
     with open('config.yaml') as file:
         config_mri = yaml.load(file, Loader=yaml.FullLoader)
     MODEL = "patchcore"  # 'padim', 'cflow', 'stfpm', 'ganomaly', 'dfkde', 'patchcore'
@@ -288,14 +288,14 @@ if __name__ == "__main__":
         print(len(mri_files), len(mri_files_test))
 
     if mode == 'mnist':
-        train_dataset = MNIST(config_data, images, labels, num=1, train=False, max_file=300)
+        train_dataset = MNIST(config_data, images, labels, num=3, train=False, max_file=300)
         train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 
     elif mode == 'mvtec':
         print("MVTEC data")
-        obj = 'pill'
+        obj = 'leather'
         train_files = './mvtec/{obj}/*/good/*.png'.format(obj=obj)
-        exceptions = [] #['bottle', 'bottle2', 'leather', 'zipper']
+        exceptions = []#['bottle', 'bottle2', 'leather']
         #test_files = './mvtec/{obj}/test/{defect}/*.png'.format(obj=obj, defect=defect)
 
         train_files = glob.glob(train_files)
@@ -352,9 +352,9 @@ if __name__ == "__main__":
     for _ in range(repeat):
         for i, data in enumerate(train_loader):
             if len(data) == 3:
-                input, _, _ = data
+                _, input, _ = data
             else:
-                input, _, *_ = data
+              _, input, *_ = data
             if input.shape[1] != 3:
                 input = input.repeat(1, 3, 1, 1)
             if mode != 'mri':
@@ -375,11 +375,11 @@ if __name__ == "__main__":
     print("Applying core-set subsampling to get the embedding.")
     patchcore.subsample_embedding(embeddings, 0.1)
     print("Done.")
-    if obj == '*':
-        obj = 'all'
     if mode == 'mnist':
         np.save('memory_bank_mnist_train.npy', patchcore.memory_bank.cpu().numpy()) 
     elif mode == 'mvtec':
+        if obj == '*':
+            obj = 'all'
         np.save('memory_bank_mvtec_{}.npy'.format(obj), patchcore.memory_bank.cpu().numpy())
     elif mode == 'mri':
         np.save('memory_bank_mri_flair_train.npy', patchcore.memory_bank.cpu().numpy())
