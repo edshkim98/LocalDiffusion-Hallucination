@@ -1,5 +1,5 @@
 # Tackling Structural Hallucination in Image Translation with Local Diffusion (ECCV'24)
-This is an official repository for the paper **'Tackling Structural Hallucination in Image Translation with Local Diffusion'**, which has been published to **ECCV 2024**. <br />
+This is an official repository for the paper **'Tackling Structural Hallucination in Image Translation with Local Diffusion'**, which has been published to **European Conference on Computer Vision (ECCV) 2024**. <br />
 The code is still under development :)
 # Background
 Recent developments in diffusion models have advanced conditioned image generation, yet they struggle with reconstructing out-of-distribution (OOD) images, such as unseen tumors in medical images,
