@@ -1,28 +1,64 @@
-ProjectName: 'mnist_x50_2x/'
+ProjectName: '/mnist_x50_zero2two/' 
 Model: 'model/'  
+train_phase: '2900'
 File: 'train_log/'
 Results: './results/'
 hr_files: '/cluster/project0/IQT_Nigeria/skim/HCP_Harry_x4/train/*/T1w/T1w_acpc_dc_restore_brain_sim036T_4x_groundtruth_norm.nii.gz'
 lr_files: '/cluster/project0/IQT_Nigeria/skim/HCP_Harry_x4/train/*/T1w/lr_norm*.gz'
 hr_files_test: '/cluster/project0/IQT_Nigeria/skim/HCP_Harry_x4/valid_small/*/T1w/T1w_acpc_dc_restore_brain_sim036T_4x_groundtruth_norm.nii.gz'
 lr_files_test: '/cluster/project0/IQT_Nigeria/skim/HCP_Harry_x4/valid_small/*/T1w/lr_norm*.gz'
-mri_files: '/cluster/project0/IQT_Nigeria/skim/BRATS-2/Synthetic_Data/*/*/'
+mri_files: '/cluster/project0/IQT_Nigeria/skim/BRATS_png/tumor/*_flair.png' #Synthetic_Data/*/*/'
+mvtec_path: '/home/seunghki/mnist_az/mvtec/transistor/test/*/*.png'
+oct_path: '/cluster/project0/IQT_Nigeria/skim/octid/cell_data/classification/NORMAL/*.jpeg'
+oct_ad_path: '/cluster/project0/IQT_Nigeria/skim/octid/cell_data/DRUSEN/*.jpeg' 
+anomaly_name: 3 #['cut_lead', 'bent_lead', 'damaged_case']
+oct_ad_npy_path: 'pred_all_localdiff_DME.npy'
+oct_all_path: '/cluster/project0/IQT_Nigeria/skim/octid/cell_data/*/*.jpeg' 
+imagenet_path: '/cluster/project0/IQT_Nigeria/skim/imagenet_data/car/*.JPEG'
+data: 'mnist' 
+mnist_cls: '8to3'
+start_intermediate: True
+start_timestep: 2
+return_all_timesteps: False
+augmentations: False
+use_gt: False
+use_gt_timestep: 100
+continue_fusion_timestep: 0
+branch_out: True
+denoise: False
+ood: True
+ood_AD: True
+ood_confidence: False
+mask_cond: False
+mask_x: True #Mnist only?
+classifier: False
+classifier_obj: 'tile'
+dsi: False
+dsi_class: 'carpet'
+ood_detector:
+    seg: False
+    seg_model: '/home/seunghki/mnist_az/results/brain_seg/t1seg.pth'
+    #    seg_model: '/home/seunghki/mnist_az/results/brain_seg/flairseg.pth'
+    #
+mask_x_inv: False
+translate_zero: True
 pred_objective: 'pred_x0'
+return_all_out: False
 img_size: 28
 train: False
 timestep: 50
+ddim_timestep: 50
 dim: 32
-mean_t1: 560.5572
-std_t1: 968.2950
+scheduler: 'sigmoid' #'sigmoid'
+mean_mnist: 33.31842
+std_mnist: 78.5679
+mean_t1: 610.7180906353575 #624.7875400724865
+std_t1: 1018.7631901605115 #1033.830432120183
 mean_t2: 426.0168
 std_t2: 771.2276
-mean_flair: 367.3117
-std_flair: 680.8201
+mean_flair: 221.69656048399028 #214.79340598696754
+std_flair: 386.31912016662903 #370.0123755543337
 mnist_path: './MNIST/raw/train-images-idx3-ubyte'
 mnist_labels_path: './MNIST/raw/train-labels-idx1-ubyte'
-ood: True
-mask_cond: True
-mask_x: True
-mask_x_inv: True
 cond: 'OUT'
-
+confidence_threshold: 0.7
