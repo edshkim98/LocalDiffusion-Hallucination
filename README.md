@@ -12,5 +12,5 @@ We propose a novel diffusion process aimed at reducing the hallucination in pre-
 ![results1](imgs/supple1.png)
 ![results2](imgs/supple2.png)
 # Requirements
-Python 3.9 <br />
+Python 3.9.5 <br />
 torch==1.12.1+cu113 <br />
