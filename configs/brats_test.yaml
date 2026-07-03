@@ -1,0 +1,51 @@
+# Test a trained T1 -> FLAIR translation model on tumor (OOD) BRATS slices
+# with local diffusion. Update the data/model paths before running.
+# Usage: python test.py --config configs/brats_test.yaml
+
+# experiment: which trained model to load
+ProjectName: 'brats_t12flair/'   # must contain 't12flair' or 'flair2t1' (selects the OOD thresholds)
+train_phase: '2900'              # loads ./results/<ProjectName>/model-best<train_phase>.pt
+Results: './results/'
+train: False
+data: 'mri'
+
+# data
+mri_files: '/path/to/BRATS_png/tumor/*_flair.png'
+ood: True                        # test on tumor slices (False -> healthy slices)
+augmentations: False
+translate_zero: True
+mean_t1: 610.7180906353575
+std_t1: 1018.7631901605115
+mean_flair: 221.69656048399028
+std_flair: 386.31912016662903
+
+# model / diffusion (must match training)
+img_size: 224
+dim: 32
+timestep: 1000
+ddim_timestep: 50                # set < timestep to enable DDIM sampling, or False for DDPM
+scheduler: 'sigmoid'
+pred_objective: 'pred_x0'
+
+# ---- local diffusion ----
+ood_AD: True
+memory_bank_path: './memory_bank_mri_t12flair.npy'  # pre-computed with anomaly_model_train.py
+ood_detector:
+  seg: False                     # True -> segment the tumor with a pre-trained U-Net instead of PatchCore
+  seg_model: '/path/to/t1seg.pth'
+branch_out: True
+start_intermediate: True
+start_timestep: 2
+mask_cond: False
+mask_x: True
+ood_confidence: False
+
+classifier: False
+classifier_obj: 'flair'
+# classifier_bank_path: './memory_bank_mri_flair2t1.npy'
+
+# misc
+use_gt: False
+use_gt_timestep: 100
+return_all_timesteps: False
+return_all_out: False

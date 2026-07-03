@@ -1,0 +1,49 @@
+# Test a trained MVTec super-resolution model on defective (OOD) images
+# with local diffusion. Update the data/model paths before running.
+# Calibrated OOD thresholds are available for: transistor, toothbrush, grid.
+# Usage: python test.py --config configs/mvtec_test.yaml
+
+# experiment: which trained model to load
+ProjectName: 'mvtec_transistor/'
+train_phase: '2900'              # loads ./results/<ProjectName>/model-best<train_phase>.pt
+Results: './results/'
+train: False
+data: 'mvtec'                    # 'mvtec' or 'mvtecSR' (smaller U-Net)
+
+# data
+mvtec_path: '/path/to/mvtec/transistor/test/*/*.png'
+mvtec_object: 'transistor'       # transistor | toothbrush | grid
+anomaly_name: null               # defect subfolder to test on (null -> all non-'good' images)
+ood: True
+augmentations: False
+
+# model / diffusion (must match training)
+img_size: 112
+dim: 32
+timestep: 1000
+ddim_timestep: 50                # set < timestep to enable DDIM sampling, or False for DDPM
+scheduler: 'sigmoid'
+pred_objective: 'pred_x0'
+
+# ---- local diffusion ----
+ood_AD: True
+memory_bank_path: './memory_bank_mvtec_transistor.npy'  # pre-computed with anomaly_model_train.py
+ood_detector:
+  seg: False
+  seg_model: ''
+branch_out: True
+start_intermediate: True
+start_timestep: 2
+mask_cond: False
+mask_x: True
+ood_confidence: False
+
+classifier: False
+classifier_obj: 'transistor'
+# classifier_bank_path: './memory_bank_mvtec_all.npy'
+
+# misc
+use_gt: False
+use_gt_timestep: 100
+return_all_timesteps: False
+return_all_out: False

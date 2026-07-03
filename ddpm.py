@@ -27,26 +27,12 @@ from ema_pytorch import EMA
 from accelerate import Accelerator
 
 from attend import Attend
-from data import MedDataset_png, MNIST, ImageNetDatasetSR, MvtecDatasetSR, OCTID
+from data import MedDataset_png, MNIST, MvtecDatasetSR
 import pandas as pd
 import glob
 from unet_model import ResUnet
 import yaml
 import idx2numpy
-
-from sklearn import metrics
-from torchvision.transforms import ToPILImage
-from torch import Tensor
-from torchvision import transforms
-import timm
-
-from anomalib.models.components import DynamicBufferModule, FeatureExtractor, KCenterGreedy
-from anomalib.models.patchcore.anomaly_map import AnomalyMapGenerator
-from anomalib.pre_processing import Tiler
-from train_fusion import SimpleCNN_Fusion
-
-from models import SimpleCNN, PatchcoreModel, Classifier_PatchCore
-# from denoising_diffusion_pytorch.version import __version__
 
 # constants
 
@@ -621,6 +607,8 @@ class GaussianDiffusion(nn.Module):
 
     def call_classifier(self):
         if self.config['classifier']:
+            # imported lazily so that training does not require anomalib to be installed
+            from models import Classifier_PatchCore
             print("Classifier is being called")
             self.classifier = Classifier_PatchCore(self.config, obj=self.config['classifier_obj'], threshold=None)
 
@@ -789,10 +777,6 @@ class GaussianDiffusion(nn.Module):
                 x_in = x[1] * (1. - mask.to(device))
                 assert torch.any((x_out == 0.)) and torch.any((x_in == 0.)), 'x_out and x_in should be masked'
 
-                # if self.t < 50:
-                np.save('./fusion_test/'+str(self.instance)+'_pred_out'+'.npy', x_out.cpu().detach().numpy())
-                np.save('./fusion_test/'+str(self.instance)+'_pred_in'+'.npy', x_in.cpu().detach().numpy())
-
                 self.x_branchout = [x_out, x_in]
                 x = torch.where(x_out == 0., x_in, x_out)
                 
@@ -861,11 +845,7 @@ class GaussianDiffusion(nn.Module):
 
     def branching_out(self, img, x_start, imgs, x_start_lst):
 
-        # print("Branching out at timestep: ", self.t)
         imgs.append([img[0].cpu(), img[1].cpu()])
-        if self.t == 0:
-            np.save('pred_out2.npy', img[0].cpu().detach().numpy())
-            np.save('pred_in2.npy', img[1].cpu().detach().numpy())
         x_start_lst.append([x_start[0].cpu(), x_start[1].cpu()])
         self.branch_cnt = 1
 
@@ -1345,9 +1325,10 @@ class Trainer(object):
             mri_files_test = mri_files[train_split:]
             mri_labels_test = mri_files_labels[train_split:]
         
-            if self.config['train']:  
-                self.ds = MNIST(self.config, mri_files_train, mri_labels_train, train=True, num=8, max_file=200) 
-                self.ds_test = MNIST(self.config, mri_files_test, mri_labels_test, train=False, num=8, max_file=100)
+            if self.config['train']:
+                ind_digit = self.config.get('mnist_ind_digit', 8) #the in-distribution digit the model is trained on
+                self.ds = MNIST(self.config, mri_files_train, mri_labels_train, train=True, num=ind_digit, max_file=200)
+                self.ds_test = MNIST(self.config, mri_files_test, mri_labels_test, train=False, num=ind_digit, max_file=100)
 
                 dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
                 dl_test = DataLoader(self.ds_test, batch_size = train_batch_size, shuffle = False, pin_memory = True, num_workers = cpu_count())
@@ -1358,7 +1339,7 @@ class Trainer(object):
                 print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
                 print("Min: {} Max: {}".format(data[0].min(), data[0].max()))
 
-        elif self.config['data'] == 'mvtec':
+        elif 'mvtec' in self.config['data']:
             # dataset and dataloader
             mri_files = self.config['mvtec_path']
             mri_files = np.array(glob.glob(mri_files))
@@ -1383,58 +1364,9 @@ class Trainer(object):
                 print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
                 print("Min: {} Max: {}".format(data[0].min(), data[0].max()))
 
-        elif 'oct' in self.config['data']:
-            # dataset and dataloader
-            mri_files = self.config['oct_path']
-            mri_files = np.array(glob.glob(mri_files))
-            #shuffle mri_files
-            np.random.seed(42)
-            np.random.shuffle(mri_files)
-            #split mri_files into train, validation and test in 70:15:15 ratio
-            train_split = int(0.7 * len(mri_files))
-            
-            mri_files_train = mri_files[:train_split]
-            mri_files_test = mri_files[train_split:]
-            print("Original OCT files: {} {}".format(len(mri_files_train), len(mri_files_test)))
+        else:
+            raise ValueError(f"unknown dataset '{self.config['data']}', expected one of: mri, mnist, mvtec")
 
-            if self.config['train']:
-                self.ds = OCTID(self.config, mri_files_train, train=True, max_file=self.config['max_num'])
-                self.ds_test = OCTID(self.config, mri_files_test, train=True, max_file=self.config['max_num'])
-
-                dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
-                dl_test = DataLoader(self.ds_test, batch_size = train_batch_size, shuffle = False, pin_memory = True, num_workers = cpu_count())
-
-                data = next(iter(dl))
-                data2 = next(iter(dl_test))
-                print("Train: {} Vali: {}".format(len(dl), len(dl_test)))
-                print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
-                print("Min: {} Max: {}".format(data[0].min(), data[0].max()))
-        elif 'imagenet' in self.config['data']:
-            mri_files = self.config['imagenet_path']
-            mri_files = np.array(glob.glob(mri_files))
-
-            #shuffle mri_files  
-            np.random.seed(42)
-            np.random.shuffle(mri_files)
-            #split mri_files into train, validation and test in 70:15:15 ratio
-            train_split = int(0.7 * len(mri_files))
-
-            mri_files_train = mri_files[:train_split]
-            mri_files_test = mri_files[train_split:]
-            print("Original ImageNet files: {} {}".format(len(mri_files_train), len(mri_files_test)))
-
-            if self.config['train']:
-                self.ds = ImageNetDatasetSR(mri_files_train, train=True)
-                self.ds_test = ImageNetDatasetSR(mri_files_test, train=True)
-
-                dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
-                dl_test = DataLoader(self.ds_test, batch_size = train_batch_size, shuffle = False, pin_memory = True, num_workers = cpu_count())
-
-                data = next(iter(dl))
-                data2 = next(iter(dl_test))
-                print("Train: {} Vali: {}".format(len(dl), len(dl_test)))
-                print("Train shape: {} {} Vali shape: {} {}".format(data[0].shape, data[1].shape, data2[0].shape, data2[1].shape))
-                print("Min: {} Max: {}".format(data[0].min(), data[0].max()))
         if self.config['train']:
              self.dl = dl
              self.dl_test = dl_test
@@ -1450,7 +1382,7 @@ class Trainer(object):
             self.ema.to(self.device)
         self.results_folder_string = results_folder+self.config['ProjectName']
         self.results_folder = Path(results_folder+self.config['ProjectName'])
-        self.results_folder.mkdir(exist_ok = True)
+        self.results_folder.mkdir(parents = True, exist_ok = True)
         # Save the dictionary as a yaml file
         with open(self.results_folder_string+'/config.yaml', 'w') as yaml_file:
             yaml.dump(configs, yaml_file)
@@ -1560,8 +1492,8 @@ class Trainer(object):
                 self.opt.step()
                 self.opt.zero_grad()
               
-                self.df_train = self.df.append({'epoch': self.step, 'loss': total_loss}, ignore_index=True)
-                #save self.df to csv
+                self.df_train = pd.concat([self.df_train, pd.DataFrame([{'epoch': self.step, 'loss': total_loss}])], ignore_index=True)
+                #save self.df_train to csv
                 self.df_train.to_csv(self.results_folder_string+"/train_loss.csv")
 
                 accelerator.wait_for_everyone()
@@ -1579,9 +1511,7 @@ class Trainer(object):
                                 hr, lr, _ = data
                                 hr = hr.to(device)
                                 lr = lr.to(device)
-                                #loss = self.model.sample(hr,lr, train=False)
-                                out = self.ema.ema_model.sample(lr, batch_size=lr.shape[0], mask = None, return_all_timesteps = False, min_max = self.min_max_val)
-                                #lst.append(loss.cpu().detach().numpy())
+                                out = self.ema.ema_model.sample(lr, hr, batch_size=lr.shape[0], mask = None, return_all_timesteps = False, min_max_val = self.min_max_val)
                                 lst.append(torch.nn.MSELoss()(out, hr).cpu().detach().numpy())
 
                         ls = np.mean(np.array(lst))
@@ -1590,16 +1520,14 @@ class Trainer(object):
                             self.best_ls = ls
                             if self.config['data'] == 'mnist':
                                 train_phase = self.round_num(self.step, num=100)
-                            elif self.config['data'] == 'mri':
-                                train_phase = self.round_num(self.step, num=500)
-                            elif self.config['data'] == 'mvtec':
+                            else:
                                 train_phase = self.round_num(self.step, num=500)
                             self.save("best"+str(train_phase))
                             np.save(self.results_folder_string+"/hr.npy", hr.cpu())
                             np.save(self.results_folder_string+"/lr.npy", lr.cpu())
                             np.save(self.results_folder_string+"pred.npy", out.cpu().detach())
 
-                        self.df = self.df.append({'epoch': self.step, 'loss': ls}, ignore_index=True)
+                        self.df = pd.concat([self.df, pd.DataFrame([{'epoch': self.step, 'loss': ls}])], ignore_index=True)
                         self.df.to_csv(self.results_folder_string+"/loss.csv")
                 pbar.update(1)
 

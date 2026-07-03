@@ -32,4 +32,4 @@ source /share/apps/source_files/cuda/cuda-10.2.source
 
 source /home/seunghki/skim_py39/bin/activate
 
-python3 test.py
+python3 test.py --config configs/mnist_test.yaml

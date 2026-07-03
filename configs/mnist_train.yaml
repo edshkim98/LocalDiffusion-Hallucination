@@ -1,0 +1,38 @@
+# Train a conditional diffusion model (2x super-resolution) on MNIST digit '8'.
+# Usage: python train.py --config configs/mnist_train.yaml
+
+# experiment
+ProjectName: 'mnist_x250_2x/'   # checkpoints/logs are written to ./results/<ProjectName>
+train: True
+data: 'mnist'
+
+# data
+mnist_path: './MNIST/raw/train-images-idx3-ubyte'
+mnist_labels_path: './MNIST/raw/train-labels-idx1-ubyte'
+mnist_ind_digit: 8              # the in-distribution digit the model is trained on
+augmentations: False
+
+# model / diffusion
+img_size: 28
+dim: 32
+timestep: 250
+scheduler: 'sigmoid'
+pred_objective: 'pred_x0'
+
+# optimization
+batch_size: 64
+lr: 1.0e-4
+train_num_steps: 100000
+
+# sampling flags (must stay off during training; used by the validation sampling)
+branch_out: False
+start_intermediate: False
+start_timestep: 2
+mask_cond: False
+mask_x: False
+ood_AD: False
+ood_confidence: False
+use_gt: False
+use_gt_timestep: 100
+classifier: False
+classifier_obj: 'tile'

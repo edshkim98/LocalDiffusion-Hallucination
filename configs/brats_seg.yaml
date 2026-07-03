@@ -1,0 +1,8 @@
+# Train the BRATS tumor segmentation U-Net, an optional OOD detector for MRI
+# (used at test time when config['ood_detector']['seg'] is True).
+# Usage: python train_seg.py --config configs/brats_seg.yaml
+
+ProjectName: 'brats_seg/'
+mri_files: '/path/to/BRATS/Synthetic_Data/*/*/'   # .mha folders (see data.py: MedSegDataset)
+mean_flair: 221.69656048399028
+std_flair: 386.31912016662903

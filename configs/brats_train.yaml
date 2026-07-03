@@ -1,0 +1,42 @@
+# Train a T1 -> FLAIR translation model on healthy (tumor-free) BRATS slices.
+# Update mri_files to your BRATS png folder before running.
+# Usage: python train.py --config configs/brats_train.yaml
+
+# experiment
+ProjectName: 'brats_t12flair/'
+train: True
+data: 'mri'
+
+# data (see data.py: MedDataset_png expects <name>_flair.png / <name>_t1.png / <name>_seg.npy triplets)
+mri_files: '/path/to/BRATS_png/*/*_flair.png'
+augmentations: False
+translate_zero: True
+mean_t1: 610.7180906353575
+std_t1: 1018.7631901605115
+mean_flair: 221.69656048399028
+std_flair: 386.31912016662903
+
+# model / diffusion
+img_size: 224
+dim: 32
+timestep: 1000
+scheduler: 'sigmoid'
+pred_objective: 'pred_x0'
+
+# optimization
+batch_size: 16
+lr: 1.0e-4
+train_num_steps: 100000
+
+# sampling flags (must stay off during training; used by the validation sampling)
+branch_out: False
+start_intermediate: False
+start_timestep: 2
+mask_cond: False
+mask_x: False
+ood_AD: False
+ood_confidence: False
+use_gt: False
+use_gt_timestep: 100
+classifier: False
+classifier_obj: 'flair'

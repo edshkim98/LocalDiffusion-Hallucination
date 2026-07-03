@@ -32,10 +32,15 @@ class DiceLoss(nn.Module):
 
 if __name__ == "__main__":
 
-    with open('config_seg.yaml') as file:
+    import argparse
+    parser = argparse.ArgumentParser(description='Train the BRATS tumor segmentation U-Net (optional OOD detector).')
+    parser.add_argument('--config', default='configs/brats_seg.yaml')
+    args = parser.parse_args()
+
+    with open(args.config) as file:
         config = yaml.load(file, Loader=yaml.FullLoader)
-    
-    os.mkdir('./results/'+config['ProjectName'])
+
+    os.makedirs('./results/'+config['ProjectName'], exist_ok=True)
     # dataset and dataloader
     mri_files = config['mri_files']
     mri_files = np.array(glob.glob(mri_files))
@@ -93,7 +98,7 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
             train_ls.append(loss.cpu().item())
-        df_train = df_train.append({'epoch': e, 'loss': np.mean(np.array(train_ls))}, ignore_index=True)
+        df_train = pd.concat([df_train, pd.DataFrame([{'epoch': e, 'loss': np.mean(np.array(train_ls))}])], ignore_index=True)
         df_train.to_csv('./results/'+config['ProjectName']+'/train.csv', index=False)
         #save input, target and prediction
         np.save('./results/'+config['ProjectName']+f'/input_{e}.npy', input.cpu().detach().numpy())
@@ -113,7 +118,7 @@ if __name__ == "__main__":
                 dice = 1-loss.cpu().item()
                 dices.append(dice)
                 bce_loss.append(loss2.cpu().item())
-            df_val = df_val.append({'epoch': e, 'dice': np.mean(np.array(dices)), 'bce': np.mean(np.array(bce_loss))}, ignore_index=True)
+            df_val = pd.concat([df_val, pd.DataFrame([{'epoch': e, 'dice': np.mean(np.array(dices)), 'bce': np.mean(np.array(bce_loss))}])], ignore_index=True)
             df_val.to_csv('./results/'+config['ProjectName']+ '/val.csv', index=False)
         
         if np.mean(np.array(dices)) > best_dice:

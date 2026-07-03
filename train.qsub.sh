@@ -32,4 +32,4 @@ source /share/apps/source_files/cuda/cuda-11.0.source
 
 source /home/seunghki/skim_py39/bin/activate
 
-python3 main.py
+python3 train.py --config configs/mnist_train.yaml

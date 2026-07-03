@@ -1,32 +1,21 @@
-from pathlib import Path
-from functools import partial
+import glob
 
 import numpy as np
 import torch
-from torch import nn
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms as T, utils
+from torch.utils.data import Dataset
+from torch.utils.data.dataloader import default_collate
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 
 from PIL import Image
-import torchvision.transforms.functional as TF
 import torchvision.transforms as T
 import torchvision.transforms as transforms
 
-from datasets.utils.file_utils import get_datasets_user_agent
-import io
-import urllib
-from torch.utils.data.dataloader import default_collate
-import nibabel as nib
-import glob
-
-from medpy.io import load
-from medpy.io import header
+try:
+    from medpy.io import load  # only needed for the .mha-based BRATS datasets
+except ImportError:
+    load = None
 
 torch.set_warn_always(False)
-
-USER_AGENT = get_datasets_user_agent()
 
 # helpers functions
 
@@ -669,77 +658,7 @@ class MedSegDataset(Dataset):
 
         seg = self.np2tensor(seg)
         seg = self.transform(seg)
-        
-        return flair_sample, seg
 
-#IMAGE Segmentation for BRATS
-class MedSegDataset(Dataset):
-    def __init__(
-        self,
-        config,
-        mri_files,
-        train=True
-    ):
-        self.config = config
-        self.mris = mri_files
-        self.train = train
-        self.lst = []
-        for mri in self.mris:
-            flair = glob.glob(mri + '/VSD.Brain.XX.O.MR_Flair/*.mha')[0]
-            seg = glob.glob(mri + 'VSD.Brain_*more.XX*/*.mha')[0]
-
-            seg, _ = load(seg)
-            self.cnt = 0
-            self.total = 28
-            low,high,skip = 60,140,3
-            for i in range(low, high, skip):
-                slice = seg[:,:,i]
-                if len(np.unique(slice)) > 1:
-                    self.lst.append([flair,slice,i])
-                #else:
-                #    self.lst_healthy.append([flair,slice,i])
-
-        #print(len(self.lst_tumor), len(self.lst_healthy))
-        #self.lst = self.lst_tumor #+ self.lst_healthy
-                
-
-    def transform(self, img, size=(224,224)):
-        transform = T.Compose([
-            T.CenterCrop(size)])
-            #T.RandomHorizontalFlip(),
-            #T.RandomVerticalFlip()])
-        return transform(img)
-        
-    def normalize(self, img):
-        
-        img = (img - self.config['mean_flair'])/(self.config['std_flair'])
-        
-        return img
-    
-    def np2tensor(self, x, unsqueeze=True):
-        x = torch.tensor(x)
-        if unsqueeze:
-            x = torch.unsqueeze(x,0)
-        return x
-
-    def __len__(self):
-        return len(self.lst)
-
-    def __getitem__(self, idx):
-        flair, seg, slice = self.lst[idx][0], self.lst[idx][1], self.lst[idx][2]
-        flair_sample, _ = load(flair)
-        flair_sample = flair_sample[:,:,slice].astype(np.float32)
-        #make into 3-channel image
-        #flair_sample = np.stack((flair_sample,flair_sample,flair_sample),axis=0)
-        seg = torch.tensor((seg>0).astype(np.float32))
-        
-        flair_sample = self.np2tensor(flair_sample)
-        flair_sample = self.transform(flair_sample)
-        flair_sample = self.normalize(flair_sample)
-
-        seg = self.np2tensor(seg)
-        seg = self.transform(seg)
-        
         return flair_sample, seg
 
 

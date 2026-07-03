@@ -275,16 +275,16 @@ class Classifier_PatchCore(nn.Module):
             patchcore = PatchcoreModel(input_size = [224, 224], layers = layers,backbone= self.backbone, pre_trained= True, num_neighbors= 9)
         patchcore.trianing=False
 
+        #path to the PatchCore weights/memory bank pre-computed on the *target* domain (see anomaly_model_train.py)
+        bank_path = self.config.get('classifier_bank_path', None)
         if 'mnist' in self.mode:
-            patchcore.load_state_dict(torch.load(f'patchcore_mnist_{self.obj}_hr.pth'))
-        elif 'mvtec' in self.mode:
-            if self.obj == 'pill':
-                pretrained = np.load(f'/home/seunghki/mnist_az/memory_bank_mvtec_pill_hr.npy')
-            else:
-                pretrained = np.load(f'/home/seunghki/mnist_az/memory_bank_mvtec_all.npy')
+            ckpt_path = bank_path if bank_path is not None else f'patchcore_mnist_{self.obj}_hr.pth'
+            patchcore.load_state_dict(torch.load(ckpt_path))
         else:
-            pretrained = np.load(f'/home/seunghki/mnist_az/memory_bank_mri_flair2t1.npy')
-        patchcore.memory_bank = torch.from_numpy(pretrained)#.to(device)  
+            if bank_path is None:
+                raise ValueError("config['classifier_bank_path'] must point to a pre-computed PatchCore memory bank (.npy) when the classifier is enabled")
+            pretrained = np.load(bank_path)
+            patchcore.memory_bank = torch.from_numpy(pretrained)
 
         self.patchcore = patchcore
         self.patchcore.memory_bank = self.patchcore.memory_bank.to(device)
@@ -296,7 +296,7 @@ class Classifier_PatchCore(nn.Module):
     def create_testloader(self):
         
         if 'mvtec' in self.mode:
-            test_files = f'/home/seunghki/mnist_az/mvtec/{self.obj}/test/*/*.png'
+            test_files = self.config.get('classifier_test_files', f'./mvtec/{self.obj}/test/*/*.png')
             test_files = glob.glob(test_files)
             self.test_dataset = MvtecDatasetSR(test_files, train=False, mode=None, denoise=False)
             self.test_loader = DataLoader(self.test_dataset, batch_size=1, shuffle=False)

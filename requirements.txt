@@ -1,0 +1,23 @@
+# Core (training + sampling)
+torch>=1.12
+torchvision
+numpy
+pandas
+PyYAML
+tqdm
+einops
+ema-pytorch
+accelerate
+Pillow
+packaging
+idx2numpy
+
+# OOD detection / adaptive fusion (test-time only)
+# anomalib 0.3.x is required for the old-style imports
+# (anomalib.models.components, anomalib.models.patchcore, anomalib.pre_processing)
+anomalib==0.3.7
+timm
+scikit-learn
+
+# Optional: only needed for the .mha-based BRATS datasets (MedDataset / MedSegDataset)
+# medpy

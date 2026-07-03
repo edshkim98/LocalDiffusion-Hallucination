@@ -1,0 +1,53 @@
+# Test a trained MNIST model on OOD digits (trained on '8', tested on '3')
+# with local diffusion (branching + fusion).
+# Usage: python test.py --config configs/mnist_test.yaml
+
+# experiment: which trained model to load
+ProjectName: 'mnist_x50_zero2two/'  # must match the ProjectName the model was trained with
+train_phase: '2900'                 # loads ./results/<ProjectName>/model-best<train_phase>.pt
+Results: './results/'
+train: False
+data: 'mnist'
+
+# data
+mnist_path: './MNIST/raw/train-images-idx3-ubyte'
+mnist_labels_path: './MNIST/raw/train-labels-idx1-ubyte'
+mnist_test_path: './MNIST/raw/t10k-images-idx3-ubyte'
+mnist_labels_test_path: './MNIST/raw/t10k-labels-idx1-ubyte'
+mnist_cls: '8to3'                   # IND->OOD digit pair; selects the calibrated OOD thresholds ('8to3' or '8to5')
+anomaly_name: 3                     # the OOD digit to test on
+ood: True                           # test on OOD data (False -> test on IND data)
+augmentations: False
+
+# model / diffusion (must match training)
+img_size: 28
+dim: 32
+timestep: 50
+ddim_timestep: 50                   # set < timestep to enable DDIM sampling, or False for DDPM
+scheduler: 'sigmoid'
+pred_objective: 'pred_x0'
+
+# ---- local diffusion (the method of the paper) ----
+ood_AD: True                        # detect the OOD region with PatchCore
+memory_bank_path: './memory_bank_mnist_train.npy'  # pre-computed with anomaly_model_train.py
+ood_detector:
+  seg: False                        # (MRI only) use a segmentation model instead of PatchCore
+  seg_model: ''
+branch_out: True                    # run separate IND / OOD reverse-diffusion branches
+start_intermediate: True            # fuse the two branches during sampling...
+start_timestep: 2                   # ...once t <= start_timestep
+mask_cond: False
+mask_x: True                        # mask the OOD-branch prediction outside the OOD region
+ood_confidence: False
+
+# optional adaptive fusion: a PatchCore classifier decides whether the fused
+# prediction is plausible, otherwise branching continues
+classifier: False
+classifier_obj: 'tile'
+# classifier_bank_path: './patchcore_mnist_tile_hr.pth'
+
+# misc
+use_gt: False
+use_gt_timestep: 100
+return_all_timesteps: False
+return_all_out: False
